@@ -15,6 +15,7 @@ import kr.go.kahis.batchmonitor.common.annotation.TsuId;
 import kr.go.kahis.batchmonitor.persistence.enumeration.ErrorType;
 import kr.go.kahis.batchmonitor.persistence.enumeration.JudgementType;
 import kr.go.kahis.batchmonitor.persistence.enumeration.StatusType;
+import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import org.hibernate.annotations.Comment;
@@ -80,4 +81,18 @@ public class StatusLog {
   @Comment("생성 날짜 시간")
   private LocalDateTime createAt;
 
+  @Builder
+  public StatusLog(String eventId, String dagId, String taskId, ErrorType errorType,
+      String errorMessage, String metadata, StatusType statusType, JudgementType judgementType,
+      String reason) {
+    this.eventId = eventId;
+    this.dagId = dagId;
+    this.taskId = taskId;
+    this.errorType = errorType;
+    this.errorMessage = errorMessage;
+    this.metadata = metadata;
+    this.statusType = statusType;
+    this.judgementType = judgementType;
+    this.reason = reason;
+  }
 }
