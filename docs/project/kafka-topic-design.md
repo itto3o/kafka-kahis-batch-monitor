@@ -510,3 +510,19 @@ FRMHS_NO (CHAR 8)                 FRMHS_SN (NUMBER 13) ← TN_FRMHS.FRMHS_SN
 |-------------|------|------|
 | `batch-action-result` | 조치 결과 추적 필요 시 | Clear/Success 실행 결과 (성공/실패) |
 | `data-sync-detected` | 원천 DB Polling 구현 시 | 방역본부 데이터 수정 감지 이벤트 |
+---
+
+## 9. checks 에러 메시지 추출 결과
+
+- `"{std_dt}의 데이터가 존재하지 않습니다."` (`check_calculation_environment_information.py`)
+- `"농장 정보의 개수가 한달 평균 개수와 10% 이상 차이납니다. 확인이 필요합니다."` (`check_tb_diseasecontrol_status_information.py`)
+- `"{std_dt}의 방역카드 정보가 존재하지 않습니다."` (`check_tb_diseasecontrol_status_information.py`)
+- `"{std_dt}의 농장정보가 존재하지 않습니다."` (`check_tb_farm_information.py`)
+- `"좌표 정보가 없는 농장이 존재합니다. {len(loc_null_lst)}개  농장 : {loc_null_lst_formatting}"` (`check_tb_farm_information.py`)
+- `"PNU 시도 코드가 표준 코드와 다른 농장이 존재합니다. 확인이 필요합니다. PNU : {i}"` (`check_tb_farm_information.py`)
+- `"전날과 농장 정보의 갯수 차이가 오차범위 이상입니다. 확인이 필요합니다."` (`check_tb_farm_information.py`)
+- `"{std_dt}의 축종정보가 존재하지 않습니다."` (`check_tb_livestock_species_information.py`)
+- `"{row['farm_serial_no']}의 {row['livestock_species_class_code']} 사육두수 비교에 이상이 감지되었습니다. 당일 사육두수: {row['present_breeding_livestock_count']}, 전일 사육두수: {row['present_breeding_livestock_count_prev']}"` (`check_tb_livestock_species_information.py`)
+- `"{ standard_date }의 tb_prediction_result 데이터수가 tb_trainingset의 데이터수와 일치하지 않습니다."` (`check_tb_prediction_result.py`)
+- `"{row['farm_serial_no']}의 예측값이 크게 차이납니다. 당일 예측치: {row['infection_risk_rank']}, 전일 예측치: {row['infection_risk_rank_prev']}"` (`check_tb_prediction_result.py`)
+- 공통 예외 로그 메시지: `Error occurred: {e}` (`check_calculation_environment_information.py`, `check_tb_diseasecontrol_status_information.py`, `check_tb_farm_information.py`, `check_tb_livestock_species_information.py`)
