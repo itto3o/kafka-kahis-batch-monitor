@@ -7,7 +7,7 @@ import java.util.Optional;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import kr.go.kahis.batchmonitor.persistence.enumeration.ErrorType;
+import kr.go.kahis.batchmonitor.common.enumeration.ErrorType;
 
 public final class ParserUtil {
 

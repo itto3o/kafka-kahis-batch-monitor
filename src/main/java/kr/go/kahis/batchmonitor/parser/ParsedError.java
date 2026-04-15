@@ -1,7 +1,7 @@
 package kr.go.kahis.batchmonitor.parser;
 
 import java.util.Map;
-import kr.go.kahis.batchmonitor.persistence.enumeration.ErrorType;
+import kr.go.kahis.batchmonitor.common.enumeration.ErrorType;
 
 public record ParsedError(
     ErrorType errorType,

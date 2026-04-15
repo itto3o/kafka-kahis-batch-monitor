@@ -12,7 +12,7 @@ import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 import java.time.LocalDateTime;
 import kr.go.kahis.batchmonitor.common.annotation.TsuId;
-import kr.go.kahis.batchmonitor.persistence.enumeration.ErrorType;
+import kr.go.kahis.batchmonitor.common.enumeration.ErrorType;
 import kr.go.kahis.batchmonitor.persistence.enumeration.JudgementType;
 import kr.go.kahis.batchmonitor.persistence.enumeration.StatusType;
 import lombok.Builder;
