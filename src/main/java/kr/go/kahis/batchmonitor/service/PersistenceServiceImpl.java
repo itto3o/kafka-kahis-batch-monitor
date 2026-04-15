@@ -3,6 +3,7 @@ package kr.go.kahis.batchmonitor.service;
 import jakarta.transaction.Transactional;
 import java.time.LocalDateTime;
 import kr.go.kahis.batchmonitor.dto.ErrorRequest;
+import kr.go.kahis.batchmonitor.messaging.producer.KafkaEventProducer;
 import kr.go.kahis.batchmonitor.parser.ParsedError;
 import kr.go.kahis.batchmonitor.parser.ParserUtil;
 import kr.go.kahis.batchmonitor.persistence.entity.StatusLog;
@@ -16,9 +17,11 @@ import org.springframework.stereotype.Service;
 public class PersistenceServiceImpl implements PersistenceService {
 
   private final StatusLogRepository statusLogRepository;
+  private final KafkaEventProducer kafkaEventProducer;
 
   /**
    * airflow error메시지를 수신하여 kafka에 event를 publish 한다.
+   *
    * @param dto dto
    */
   @Override
@@ -42,6 +45,8 @@ public class PersistenceServiceImpl implements PersistenceService {
         .build());
 
     // publish
+    kafkaEventProducer.publish(eventId, dto.dagId(), dto.taskId(), parsed.errorType(),
+        dto.errorMessage(), parsed.metadata());
 
   }
 }
