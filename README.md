@@ -92,7 +92,7 @@ kafka-practice/
 │   └── Application.java              # Spring Boot 메인 클래스
 ├── src/main/resources/
 │   ├── application.yml                # 공통 설정 (Jackson, Feign, Airflow)
-│   └── application-dev.yml            # 개발 환경 설정 (Kafka, DB, Logging)
+│   └── application-local.yml          # 로컬 환경 설정 (Kafka, DB, Logging)
 ├── compose.yaml                       # Docker Compose (Kafka 클러스터 + PostgreSQL)
 ├── build.gradle                       # 빌드 설정 및 의존성
 └── settings.gradle                    # Gradle 프로젝트 설정

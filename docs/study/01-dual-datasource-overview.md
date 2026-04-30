@@ -28,7 +28,7 @@ common/config/
 ## 흐름 요약
 
 ```
-application-dev.yml
+application-local.yml
   spring.datasource.postgres.*  ──→  PostgresDataSourceConfig  ──→  JPA Repository
   spring.datasource.oracle.*    ──→  OracleDataSourceConfig    ──→  MyBatis Mapper
 ```
