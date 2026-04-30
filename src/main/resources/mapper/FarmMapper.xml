@@ -1,0 +1,77 @@
+<mapper namespace="kr.go.kahis.batchmonitor.reader.mapper.FarmMapper">
+  <select id="selectMobileBreedingLivestockHistory" resultType="MobileBreedingLivestockHistoryDto">
+    SELECT
+      FRMHS_NO,
+      LSTKSP_CL,
+      BRD_HAD_CO,
+      LAST_CHANGE_DT
+    FROM TN_MOBILE_BLVSTCK_HIST
+    WHERE FRMHS_NO = #{farmId}
+    ORDER BY LAST_CHANGE_DT DESC
+  </select>
+  <select id="selectFarmIdDpl" resultType="FarmIdDplDto">
+    SELECT FRMHS_NO
+    FROM TN_BLVSTCK
+    WHERE FRMHS_NO IN (
+                        SELECT VF.FRMHS_NO
+                        FROM VIEW_FRMHS VF, TN_MOBILE_FRMHS_INFO@M2MSYS TMFI
+                        WHERE VFFDB_FRMHS_SN = TMFI.FDB_FRMHS_SN
+                        AND TMFI.FRMHS_NO = #{farmId}
+                      )
+  </select>
+  <select id="selectFarmIdLsfarm" resultType="FarmIdLsfarmDto">
+    SELECT TFNM.CNTC_FRMHS_NO
+    FROM TN_FRMHS@DL_LSFARM TF, TN_FARMHS_NO_MAPNG@DL_LSFARM TFNM
+    WHERE TF.FRMHS_SN = TFNM.FRMHS_SN
+    AND TF.USE_AT = 'Y'
+    AND TFNM.USE_AT = 'Y'
+    AND TFNM.INSTT_SE_CODE = '03'
+    AND TF.FRMHS_SN = (
+                        SELECT FDB_FRMHS_SN
+                        FROM VIEW_FRMHS
+                        WHERE FRMHS_NO = #{farmId}
+                      )
+  </select>
+  <select id="selectFarmInfo" resultType="FarmInfoDto">
+    SELECT
+      FARM_NO,
+      FARM_NM,
+      BRD_OWNER_NM,
+      FRMHS_STTUS_CODE,
+      RE_PREARNGE_DE,
+      UPDT_DE
+    FROM EAI_TN_FARM_INFO
+    WHERE FARM_NO = #{farmId}
+  </select>
+  <select id="selectFarmScale" resultType="FarmScaleDto">
+    SELECT
+      FARM_NO,
+      UPPER_PRDLST_CODE,
+      BRD_CO,
+      MGR_CODE,
+      EXAMIN_MTH_CODE,
+      EXAMIN_DE,
+      UPDT_DE
+    FROM EAI_TN_FARM_SCALE
+    WHERE FARM_NO = #{farmId}
+    ORDER BY UPDT_DE DESC
+  </select>
+  <select id="selectFarmScaleDetail" resultType="FarmScaleDetailDto">
+    SELECT
+      FARM_NO,
+      UPPER_PRDLST_CODE,
+      SPCIES_CODE,
+      SEQ_SN,
+      BRD_CO,
+      AVG_CNT,
+      MXMM_BRD_CO,
+      MOTHER_PIG_CO,
+      PORKER_CO,
+      MGR_CODE,
+      KEEP_CODE,
+      EXAMIN_DE,
+      UPDT_DE
+    FROM EAI_TN_FARM_SCALE_DETAIL
+    WHERE FARM_NO = #{farmId}
+  </select>
+</mapper>
