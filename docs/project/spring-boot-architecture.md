@@ -121,12 +121,12 @@ Kafka의 가치는 수신 이후의 **비동기 파이프라인 구간**(디커�
 
 ### 2.1 에러 검증/자동 조치 Consumer (4개)
 
-4개 Consumer 모두 다음 공통 흐름을 따릅니다.
+4개 Consumer 모두 다음 공통 흐름을 따릅니다. **상태는 갱신이 아니라 새 이력 row를 추가하는 방식(append-only)**으로 기록합니다.
 
-1. `StatusLog` 상태 갱신 (`AUTO_VERIFYING`)
+1. `StatusLog` 이력 추가 (`AUTO_VERIFYING`)
 2. errorType별 검증 로직 수행 (자동 검증을 지원하는 경우)
-3. 정상 판단 시 `AirflowClient.clearTask()` 호출 → `AUTO_CLEARED` / `AUTO_CLEAR_FAILED`
-4. 비정상 또는 자동 검증 미지원 시 → `MANUAL_REVIEW_REQUIRED`
+3. 정상 판단 시 `AirflowClient.clearTask()` 호출 → `AUTO_CLEARED` / `AUTO_CLEAR_FAILED` 이력 추가
+4. 비정상 또는 자동 검증 미지원 시 → `MANUAL_REVIEW_REQUIRED` 이력 추가
 5. `error-notification` 토픽 발행 (운영자 인지용 SMS)
 
 | Consumer | 소비 토픽 | 자동 검증 로직 | 자동 Clear |
@@ -289,6 +289,8 @@ public class ErrorEventProducer {
 
 ### 4.3 Consumer 예시 (사육두수)
 
+상태 변화마다 같은 `eventId`로 새 `StatusLog` row를 추가합니다. 단일 row를 갱신하지 않습니다.
+
 ```java
 @Component
 @RequiredArgsConstructor
@@ -298,7 +300,7 @@ public class LivestockAnomalyConsumer {
     private final LivestockVerificationService verificationService;
     private final AirflowClient airflowClient;
     private final ErrorEventProducer producer;
-    private final StatusLogRepository statusLogRepository;
+    private final StatusLogUnit statusLogUnit;
 
     @KafkaListener(topics = "error.livestock-anomaly", groupId = "kafka-consumer-group")
     public void consume(ErrorEvent event, Acknowledgment ack) {
@@ -306,35 +308,61 @@ public class LivestockAnomalyConsumer {
             event.getMetadata().get("farmNumber"),
             event.getMetadata().get("speciesCode"));
 
-        StatusLog log = statusLogRepository.findByEventId(event.getEventId()).orElseThrow();
-
-        // 1. 자동 검증 시작
-        log.markAutoVerifying();
+        // 1. 자동 검증 시작 이력 추가
+        statusLogUnit.create(StatusLog.builder()
+            .eventId(event.getEventId())
+            .dagId(event.getDagId())
+            .taskId(event.getTaskId())
+            .errorType(event.getErrorType())
+            .errorMessage(event.getErrorMessage())
+            .metadata(event.getMetadata().toString())
+            .statusType(StatusType.AUTO_VERIFYING)
+            .build());
 
         // 2. HIST 조회 + 자동 판단
         VerificationResult result = verificationService.verify(event);
-        log.applyVerification(result);
 
-        // 3. 결과 분기
+        // 3. 결과 분기 — 각 결과마다 이력 row 추가
         if (result.isNormal()) {
-            // 자동 처리: Airflow Clear API 호출
             try {
                 ClearResponse resp = airflowClient.clearTask(
                     event.getDagId(), event.getTaskId(), event.getExecutionDate(), false);
-                log.markAutoCleared(resp.statusCode());
+
+                statusLogUnit.create(StatusLog.builder()
+                    .eventId(event.getEventId())
+                    .dagId(event.getDagId())
+                    .taskId(event.getTaskId())
+                    .errorType(event.getErrorType())
+                    .statusType(StatusType.AUTO_CLEARED)
+                    .judgementType(JudgementType.LIKELY_NORMAL)
+                    .reason(result.reason())
+                    .build());
             } catch (Exception e) {
-                log.markAutoClearFailed(e.getMessage());
+                statusLogUnit.create(StatusLog.builder()
+                    .eventId(event.getEventId())
+                    .dagId(event.getDagId())
+                    .taskId(event.getTaskId())
+                    .errorType(event.getErrorType())
+                    .statusType(StatusType.AUTO_CLEAR_FAILED)
+                    .judgementType(JudgementType.LIKELY_NORMAL)
+                    .reason("Clear API 실패: " + e.getMessage())
+                    .build());
             }
         } else {
-            // 운영자가 Airflow UI에서 직접 처리 — 이후 추적 없음
-            log.markManualReviewRequired();
+            statusLogUnit.create(StatusLog.builder()
+                .eventId(event.getEventId())
+                .dagId(event.getDagId())
+                .taskId(event.getTaskId())
+                .errorType(event.getErrorType())
+                .statusType(StatusType.MANUAL_REVIEW_REQUIRED)
+                .judgementType(JudgementType.LIKELY_ANOMALY)
+                .reason(result.reason())
+                .build());
         }
-
-        statusLogRepository.save(log);
 
         // 4. SMS 알림 발행 (운영자 인지용)
         producer.send("error-notification", event.getEventId(),
-            NotificationEvent.from(event, log.getStatus()));
+            NotificationEvent.from(event));
 
         // 5. 수동 ACK
         ack.acknowledge();
@@ -567,6 +595,16 @@ LivestockAnomalyConsumer
 
 > 즉, 본 시스템은 "자동 조치가 가능한 케이스를 걸러서 자동화"하는 역할만 수행하며, 운영자 승인 워크플로우(승인 화면, 승인 내역 저장 등)는 가지지 않습니다.
 
+#### 상태 기록 방식: append-only
+
+`StatusLog`는 **이력 추가(append-only) 방식**으로 운영합니다. 상태 변화마다 row를 갱신하는 것이 아니라, 같은 `eventId`로 새 row를 추가합니다.
+
+- 한 row = 한 시점의 상태 스냅샷 (`statusType` + `judgementType` + `reason` + `createAt`)
+- 한 `eventId`에 여러 row가 시간순으로 쌓임 → 처리 흐름이 그대로 감사 로그가 됨
+- "현재 상태" 조회 = 해당 `eventId`에서 가장 최근 `createAt`의 row
+- `eventId`에 unique 제약을 걸지 않습니다 (`event_id + create_at` 복합 인덱스로만 조회)
+- mark*() 같은 setter 메서드를 두지 않습니다. `StatusLog.builder().build()` + `statusLogUnit.create()`로 일관되게 추가합니다.
+
 ### 7.2 상태 흐름
 
 ```
@@ -608,13 +646,17 @@ CLEARED (운영자 수동 개입 필요 — 종결)
 (종결)
 ```
 
-모든 종결 상태(`AUTO_CLEARED`, `AUTO_CLEAR_FAILED`, `MANUAL_REVIEW_REQUIRED`)에 도달하면 본 시스템 내에서 더 이상의 상태 전이는 발생하지 않습니다.
+모든 종결 상태(`AUTO_CLEARED`, `AUTO_CLEAR_FAILED`, `MANUAL_REVIEW_REQUIRED`)의 row가 추가되면 본 시스템 내에서 더 이상의 이력은 추가되지 않습니다.
+
+> 화살표는 "row 갱신"이 아니라 "다음 단계의 row 추가"를 의미합니다. 이전 단계 row는 그대로 보존됩니다.
 
 ### 7.3 상태 정의
 
-| 상태 | 시점 | 설정 주체 | 종결 여부 | 설명 |
+각 상태는 새 row를 추가하는 시점입니다. 종결 row가 기록되면 같은 `eventId`로 더 이상 row가 추가되지 않습니다.
+
+| 상태 | row 추가 시점 | 추가 주체 | 종결 여부 | 설명 |
 |------|------|----------|----------|------|
-| `RECEIVED` | 에러 수신 직후 | `ErrorReceiveController` | × | 로그 테이블 저장 직후 초기 상태 |
+| `RECEIVED` | 에러 수신 직후 | `ErrorReceiveController` | × | 첫 이력 row |
 | `AUTO_VERIFYING` | 자동 검증 시작 | Verification Consumer | × | HIST 조회 등 자동 분석 진행 중 |
 | `AUTO_CLEARED` | Airflow Clear API 성공 | Verification Consumer | ✓ | 자동 정상 판단 후 Clear 실행 완료 |
 | `AUTO_CLEAR_FAILED` | Airflow Clear API 실패 | Verification Consumer | ✓ | Clear 호출 자체가 실패 — 운영자 수동 개입 필요 |
@@ -634,6 +676,8 @@ CLEARED (운영자 수동 개입 필요 — 종결)
 
 ### 7.5 StatusLog 엔티티
 
+append-only 모델이므로 row 갱신 가정의 필드(`statusUpdatedAt`, `clearRequestedAt`, `clearFailureReason` 등)는 두지 않습니다. Clear 결과 등 상태 부가 정보는 해당 상태 row의 `reason`에 함께 기록합니다. `eventId`는 unique가 아니라 시간순 조회를 위한 복합 인덱스(`event_id + create_at`)로만 다룹니다.
+
 ```java
 @Entity
 @Table(
@@ -641,63 +685,48 @@ CLEARED (운영자 수동 개입 필요 — 종결)
     name = "STATUS_LOG",
     indexes = {
         @Index(name = "IDX_STATUS_LOG_CREATE_AT", columnList = "create_at"),
-        @Index(name = "IDX_STATUS_LOG_EVENT_ID", columnList = "event_id", unique = true),
-        @Index(name = "IDX_STATUS_LOG_STATUS", columnList = "status")
+        @Index(name = "IDX_STATUS_LOG_EVENT_ID_CREATE_AT", columnList = "event_id, create_at")
     }
 )
+@EntityListeners(AuditingEntityListener.class)
 @Getter
 @DynamicInsert
-@DynamicUpdate
 @NoArgsConstructor(access = PROTECTED)
-@Comment("배치 에러 이벤트 상태 로그")
+@Comment("배치 모니터링 로그 관리 > 로그")
 public class StatusLog {
 
     @Id
     @TsuId
     private String id;
 
-    // Kafka 이벤트 식별자 (도메인 키)
-    @Column(nullable = false, unique = true)
+    // Kafka 이벤트 식별자 (도메인 키, 같은 eventId의 여러 row가 누적됨)
+    @Column(name = "event_id", nullable = false)
     private String eventId;
 
     // Airflow 발생 정보
     private String dagId;
     private String taskId;
-    private String executionDate;
-    private Integer tryNumber;
 
     @Enumerated(EnumType.STRING)
-    private ErrorType errorType;        // LIVESTOCK_ANOMALY / PREDICTION_ANOMALY / ASF_BATCH_FAILURE / DATA_SYNC_FAILURE / HPAI_DISPLAY_MISSING / UNKNOWN
+    private ErrorType errorType;        // LIVESTOCK_ANOMALY / PREDICTION_ANOMALY / ... / UNKNOWN
 
-    @Column(columnDefinition = "TEXT")
     private String errorMessage;
+    private String metadata;            // Parser 추출 metadata (직렬화된 문자열)
 
-    @Column(columnDefinition = "TEXT")
-    private String metadataJson;        // Parser 추출 metadata (JSON)
-
-    // 자동 검증 결과 (자동 검증을 수행한 경우만)
-    @Enumerated(EnumType.STRING)
-    private AutoJudgement autoJudgement;    // LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
-
-    @Column(columnDefinition = "TEXT")
-    private String judgementReason;
-
-    // 상태 추적
+    // 이 row가 기록한 시점의 상태
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private Status status;              // RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
+    private StatusType statusType;      // RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
 
-    // Airflow Clear API 호출 결과 (자동 처리 케이스만)
-    private LocalDateTime clearRequestedAt;     // Clear API 호출 시각
-    private Integer clearHttpStatus;             // Airflow API 응답 상태 코드
+    // 자동 검증을 수행한 경우의 판단 결과 (해당 row 한정)
+    @Enumerated(EnumType.STRING)
+    private JudgementType judgementType;    // LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
 
-    @Column(columnDefinition = "TEXT")
-    private String clearFailureReason;           // AUTO_CLEAR_FAILED 사유
+    private String reason;              // 판단 근거 또는 Clear 실패 사유 등 상태별 부가 설명
 
-    // 타임스탬프
-    private LocalDateTime detectedAt;            // Airflow 에러 감지 시각
-    private LocalDateTime statusUpdatedAt;       // 마지막 상태 전이 시각
-    private LocalDateTime createAt;              // 레코드 생성 시각
+    @CreatedDate
+    @Column(nullable = false, updatable = false)
+    private LocalDateTime createAt;     // 이 이력 row의 생성 시각 (= 상태 발생 시각)
 }
 ```
 
@@ -744,39 +773,65 @@ public ResponseEntity<?> receiveError(@RequestBody AirflowErrorRequest request) 
 
 ```java
 @KafkaListener(topics = "error.livestock-anomaly", groupId = "kafka-consumer-group")
-public void consume(ErrorEvent event, Acknowledgment ack) {
+public void consume(KafkaEvent event, Acknowledgment ack) {
 
-    StatusLog log = statusLogRepository.findByEventId(event.getEventId()).orElseThrow();
-
-    // 1. 자동 검증 시작
-    log.markAutoVerifying();
+    // 1. 자동 검증 시작 이력 추가
+    statusLogUnit.create(StatusLog.builder()
+        .eventId(event.eventId())
+        .dagId(event.dagId())
+        .taskId(event.taskId())
+        .errorType(event.errorType())
+        .errorMessage(event.errorMessage())
+        .metadata(event.metadata().toString())
+        .statusType(StatusType.AUTO_VERIFYING)
+        .build());
 
     // 2. HIST 조회 + 자동 판단
     VerificationResult result = verificationService.verify(event);
-    log.applyVerification(result);  // autoJudgement, judgementReason 기록
 
-    // 3. 결과에 따른 분기
+    // 3. 결과에 따른 분기 — 각 결과마다 새 이력 row 추가
     if (result.isNormal()) {
-        // 자동 처리: Airflow Clear API 호출
         try {
             ClearResponse resp = airflowClient.clearTask(
-                event.getDagId(), event.getTaskId(), event.getExecutionDate(), false);
-            log.markAutoCleared(resp.statusCode());
+                event.dagId(), event.taskId(), event.executionDate(), false);
+
+            statusLogUnit.create(StatusLog.builder()
+                .eventId(event.eventId())
+                .dagId(event.dagId())
+                .taskId(event.taskId())
+                .errorType(event.errorType())
+                .statusType(StatusType.AUTO_CLEARED)
+                .judgementType(JudgementType.LIKELY_NORMAL)
+                .reason(result.reason())
+                .build());
         } catch (Exception e) {
-            log.markAutoClearFailed(e.getMessage());
+            statusLogUnit.create(StatusLog.builder()
+                .eventId(event.eventId())
+                .dagId(event.dagId())
+                .taskId(event.taskId())
+                .errorType(event.errorType())
+                .statusType(StatusType.AUTO_CLEAR_FAILED)
+                .judgementType(JudgementType.LIKELY_NORMAL)
+                .reason("Clear API 실패: " + e.getMessage())
+                .build());
         }
     } else {
-        // 운영자 수동 처리 대상 — Airflow에서 직접 처리, 이후 추적 없음
-        log.markManualReviewRequired();
+        statusLogUnit.create(StatusLog.builder()
+            .eventId(event.eventId())
+            .dagId(event.dagId())
+            .taskId(event.taskId())
+            .errorType(event.errorType())
+            .statusType(StatusType.MANUAL_REVIEW_REQUIRED)
+            .judgementType(JudgementType.LIKELY_ANOMALY)
+            .reason(result.reason())
+            .build());
     }
 
-    statusLogRepository.save(log);
-
     // 알림 발송 (운영자 인지용)
-    producer.send("error-notification", event.getEventId(), NotificationEvent.from(event));
+    producer.send("error-notification", event.eventId(), NotificationEvent.from(event));
 
     ack.acknowledge();
 }
 ```
 
-자동 검증을 수행하지 않는 errorType의 Consumer는 위 흐름에서 검증/Clear 단계를 생략하고 곧바로 `MANUAL_REVIEW_REQUIRED`로 전이합니다.
+자동 검증을 수행하지 않는 errorType의 Consumer는 위 흐름에서 검증/Clear 단계를 생략하고 곧바로 `MANUAL_REVIEW_REQUIRED` row를 추가합니다.
