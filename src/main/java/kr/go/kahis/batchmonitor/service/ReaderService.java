@@ -1,5 +1,7 @@
 package kr.go.kahis.batchmonitor.service;
 
+import kr.go.kahis.batchmonitor.messaging.dto.KafkaEvent;
+
 public interface ReaderService {
 
   /**
@@ -7,5 +9,5 @@ public interface ReaderService {
    *
    * @param farmNumber 농장 일련 번호
    */
-  void analysis(String farmNumber);
+  void analysis(KafkaEvent event, String farmNumber, String speciesCode, long currentCount);
 }

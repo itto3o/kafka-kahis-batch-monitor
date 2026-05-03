@@ -4,6 +4,7 @@ import kr.go.kahis.batchmonitor.messaging.dto.KafkaEvent;
 import kr.go.kahis.batchmonitor.persistence.entity.StatusLog;
 import kr.go.kahis.batchmonitor.persistence.enumeration.StatusType;
 import kr.go.kahis.batchmonitor.persistence.unit.StatusLogUnit;
+import kr.go.kahis.batchmonitor.service.ReaderService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -16,6 +17,7 @@ import org.springframework.stereotype.Component;
 public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
 
   private final StatusLogUnit statusLogUnit;
+  private final ReaderService readerService;
 
   @KafkaListener(
       topics = "#{T(kr.go.kahis.batchmonitor.common.enumeration.ErrorType).LIVESTOCK_ANOMALY.topic}",
@@ -27,6 +29,7 @@ public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
         .eventId(event.eventId())
         .dagId(event.dagId())
         .taskId(event.taskId())
+        .lsfarmId(null)
         .errorType(event.errorType())
         .errorMessage(event.errorMessage())
         .metadata(event.metadata().toString())
@@ -35,9 +38,8 @@ public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
         .reason(null)
         .build());
 
-    // 분석
-
-    // 분석 결과 로그 저장
+    readerService.analysis(event, event.metadata().get("farmNumber"),
+        event.metadata().get("speciesCode"), Long.parseLong(event.metadata().get("currentValue")));
 
     acknowledgment.acknowledge();
   }
