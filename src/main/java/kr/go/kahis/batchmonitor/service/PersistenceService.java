@@ -1,6 +1,6 @@
 package kr.go.kahis.batchmonitor.service;
 
-import kr.go.kahis.batchmonitor.dto.ErrorRequest;
+import kr.go.kahis.batchmonitor.dto.request.ErrorRequest;
 
 public interface PersistenceService {
 

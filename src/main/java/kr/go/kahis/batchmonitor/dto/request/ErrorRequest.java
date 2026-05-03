@@ -1,4 +1,4 @@
-package kr.go.kahis.batchmonitor.dto;
+package kr.go.kahis.batchmonitor.dto.request;
 
 import java.time.LocalDate;
 import org.springframework.format.annotation.DateTimeFormat;

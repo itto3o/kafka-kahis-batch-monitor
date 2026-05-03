@@ -2,7 +2,7 @@ package kr.go.kahis.batchmonitor.service;
 
 import jakarta.transaction.Transactional;
 import java.time.LocalDateTime;
-import kr.go.kahis.batchmonitor.dto.ErrorRequest;
+import kr.go.kahis.batchmonitor.dto.request.ErrorRequest;
 import kr.go.kahis.batchmonitor.messaging.producer.KafkaEventProducer;
 import kr.go.kahis.batchmonitor.parser.ParsedError;
 import kr.go.kahis.batchmonitor.parser.ParserUtil;
