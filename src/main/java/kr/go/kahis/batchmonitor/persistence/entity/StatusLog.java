@@ -54,6 +54,9 @@ public class StatusLog {
   @Comment("airflow task 일련 번호")
   private String taskId;
 
+  @Comment("방역본부 농장 번호")
+  private String lsfarmId;
+
   @Enumerated(EnumType.STRING)
   @Comment("airflow에서 발생한 에러 유형")
   private ErrorType errorType;
@@ -82,12 +85,13 @@ public class StatusLog {
   private LocalDateTime createAt;
 
   @Builder
-  public StatusLog(String eventId, String dagId, String taskId, ErrorType errorType,
+  public StatusLog(String eventId, String dagId, String taskId, String lsfarmId, ErrorType errorType,
       String errorMessage, String metadata, StatusType statusType, JudgementType judgementType,
       String reason) {
     this.eventId = eventId;
     this.dagId = dagId;
     this.taskId = taskId;
+    this.lsfarmId = lsfarmId;
     this.errorType = errorType;
     this.errorMessage = errorMessage;
     this.metadata = metadata;

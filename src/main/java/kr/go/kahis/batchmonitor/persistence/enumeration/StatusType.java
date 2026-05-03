@@ -29,8 +29,11 @@ public enum StatusType {
   /** 자동 검증 진행 중 (HIST 조회 등). */
   AUTO_VERIFYING,
 
-  /** 자동 검증 정상 판단 → Airflow Clear API 호출 성공. (종결) */
+  /** 자동 검증 정상 판단 */
   AUTO_CLEARED,
+
+  /** 자동 검증 정상 판단 → Airflow Clear API 호출 성공. (종결) */
+  AUTO_CLEAR_SUCCESS,
 
   /** 자동 검증 정상 판단했으나 Airflow Clear API 호출 실패 → 운영자 수동 개입 필요. (종결) */
   AUTO_CLEAR_FAILED,

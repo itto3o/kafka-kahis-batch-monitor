@@ -28,6 +28,7 @@ public class KafkaEventConsumer implements KafkaConsumer {
         .eventId(event.eventId())
         .dagId(event.dagId())
         .taskId(event.taskId())
+        .lsfarmId(null)
         .errorType(event.errorType())
         .errorMessage(event.errorMessage())
         .metadata(event.metadata().toString())
