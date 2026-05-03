@@ -7,6 +7,8 @@
       LAST_CHANGE_DT
     FROM TN_MOBILE_BLVSTCK_HIST
     WHERE FRMHS_NO = #{farmId}
+      AND LSTKSP_CL = #{speciesCode}
+      AND LAST_CHANGE_DT >= ADD_MONTHS(SYSDATE, -12)
     ORDER BY LAST_CHANGE_DT DESC
   </select>
   <select id="selectFarmIdDpl" resultType="FarmIdDplDto">

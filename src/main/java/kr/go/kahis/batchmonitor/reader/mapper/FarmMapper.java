@@ -13,7 +13,8 @@ import org.apache.ibatis.annotations.Mapper;
 public interface FarmMapper {
 
   // 1. 사육두수 히스토리 조회
-  List<MobileBreedingLivestockHistoryDto> selectMobileBreedingLivestockHistory(String farmId);
+  List<MobileBreedingLivestockHistoryDto> selectMobileBreedingLivestockHistory(String farmId,
+      String speciesCode);
 
   // 2. dpl + m2m 에서 farm id 조회
   FarmIdDplDto selectFarmIdDpl(String farmId);
