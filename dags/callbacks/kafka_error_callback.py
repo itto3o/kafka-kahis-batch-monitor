@@ -63,7 +63,7 @@ def on_task_failure(context):
     """
     Task 실패 시 Spring Boot API로 에러 정보를 전송하는 공통 콜백.
 
-    Airflow context에서 dag_id, task_id, execution_date, exception 정보를 추출하여
+    Airflow context에서 dag_id, task_id, ds, exception 정보를 추출하여
     Spring Boot → Kafka 토픽으로 에러 이벤트를 발행합니다.
     """
     task_instance = context.get("task_instance")
@@ -72,7 +72,7 @@ def on_task_failure(context):
     payload = {
         "dag_id": context["dag"].dag_id,
         "task_id": task_instance.task_id,
-        "execution_date": str(context["execution_date"]),
+        "execution_date": str(context["ds"]),
         "error_message": str(exception) if exception else "",
         "try_number": task_instance.try_number,
         "task_state": str(task_instance.state),

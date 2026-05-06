@@ -1,25 +1,25 @@
 package kr.go.kahis.batchmonitor.dto.request;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import java.time.LocalDate;
-import org.springframework.format.annotation.DateTimeFormat;
-import org.springframework.web.bind.annotation.BindParam;
 
 public record ErrorRequest(
 
-    @BindParam("dag_id")
+    @JsonProperty("dag_id")
     String dagId,
 
-    @BindParam("task_id")
+    @JsonProperty("task_id")
     String taskId,
 
-    @BindParam("execution_date")
-    @DateTimeFormat(pattern = "yyyy-MM-dd")
+    @JsonProperty("execution_date")
+    @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd")
     LocalDate executionDate,
 
-    @BindParam("error_message")
+    @JsonProperty("error_message")
     String errorMessage,
 
-    @BindParam("try_number")
+    @JsonProperty("try_number")
     String tryNumber
 ) {
 
