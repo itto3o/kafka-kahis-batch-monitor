@@ -29,12 +29,11 @@ public class LivestockHistoryAnalyzer {
     }
 
     // 히스토리 파악
-    List<Long> counts = history.stream().map(MobileBreedingLivestockHistoryDto::brdHadCo).toList();
-
-    // 히스토리가 없으면 UNKNOWN으로 추정 후 종료
-    if (counts.isEmpty()) {
-      return new AnalyzeResultData(JudgementType.UNKNOWN, "HIST 부재");
-    }
+    List<Long> counts = history.stream()
+        .filter(hist -> hist.brdHadCo() != null && hist.lastChangeDt() != null)
+        .sorted(Comparator.comparing(MobileBreedingLivestockHistoryDto::lastChangeDt).reversed())
+        .map(MobileBreedingLivestockHistoryDto::brdHadCo)
+        .toList();
 
     // tolerance
     double low = currentCount * 0.5;
@@ -58,6 +57,6 @@ public class LivestockHistoryAnalyzer {
 
     return new AnalyzeResultData(
         JudgementType.LIKELY_ANOMALY,
-        "HIST 정상 — 당일값 " + currentCount + ", " + "허용범위(×0.5 ~ ×2.0) 내 매칭값 미존재");
+        "HIST 비정상 — 당일값 " + currentCount + ", " + "허용범위(×0.5 ~ ×2.0) 내 매칭값 미존재");
   }
 }

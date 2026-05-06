@@ -29,7 +29,7 @@ public class PersistenceServiceImpl implements PersistenceService {
   public void publish(ErrorRequest dto) {
     ParsedError parsed = ParserUtil.parse(dto.errorMessage());
     int nowNano = LocalDateTime.now().getNano();
-    String eventId = dto.taskId() + nowNano;
+    String eventId = dto.taskId() + "-" + nowNano;
 
     // 로그 저장
     statusLogUnit.create(StatusLog.builder()
@@ -47,6 +47,5 @@ public class PersistenceServiceImpl implements PersistenceService {
     // publish
     producer.publish(eventId, dto.dagId(), dto.taskId(), parsed.errorType(),
         dto.errorMessage(), parsed.metadata());
-
   }
 }
