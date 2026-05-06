@@ -1,6 +1,8 @@
 # 프로젝트 구조와 DataSource 매핑 가이드
 
-## 전체 디렉토리 구조
+> 이 문서는 두 데이터소스(JPA / MyBatis) 분리 원칙을 설명합니다. 실제 프로젝트 레이아웃은 `domain/` 도메인 분리 대신 **계층(layer) 분리**(messaging / persistence / reader / vo / parser / service / controller)를 따릅니다. 자세한 현재 구조는 `docs/project/spring-boot-architecture.md` Section 3 참조.
+
+## 권장 디렉토리 구조 (도메인 분리 예시 — 참고용)
 
 ```
 batchmonitor/
@@ -34,6 +36,22 @@ batchmonitor/
            └─ prediction/
                 └─ PredictionMapper.xml
 ```
+
+## 실제 프로젝트 레이아웃 (계층 분리)
+
+현재 코드는 도메인이 사실상 하나(사육두수 분석 + 에러 라우팅)이고 구성요소를 책임 계층으로 묶는 편이 자연스러워 다음 구조를 사용합니다:
+
+- `controller/` — HTTP 진입점 (`PersistenceController`)
+- `service/` — 오케스트레이션 (`PersistenceServiceImpl`, `ReaderServiceImpl`)
+- `messaging/{producer,consumer,dto}/` — Kafka Producer/Consumer + 메시지 DTO
+- `parser/` — 에러 메시지 정규식 파싱 (`ParserUtil` + 패턴/데이터 record)
+- `persistence/{entity,repository,unit,enumeration}/` — PostgreSQL JPA + 영속 단위
+- `reader/{mapper,dto}/` — Oracle MyBatis 매퍼 + 조회 DTO (외부 DB 읽기 전용)
+- `vo/` — 외부 의존(매퍼) + 도메인 로직 결합 컴포넌트 (`LivestockHistoryAnalyzer`, `LsFarmIdFinder`)
+- `dto/{request,data}/` — 컨트롤러 요청 / 내부 데이터 record
+- `common/{annotation,config,enumeration,extension,generator}/` — 공통 인프라
+
+**JPA vs MyBatis 매핑 규칙**은 위 도메인 분리 예시와 동일합니다 (아래 섹션 참조). 패키지 위치만 `domain/xxx/repository`가 아니라 `persistence/repository`로 모인 차이만 있습니다.
 
 ## 어디에 뭘 넣어야 하는가
 

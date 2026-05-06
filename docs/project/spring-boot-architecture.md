@@ -4,65 +4,54 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  Phase 1: 에러 수신 및 토픽 발행                                               │
+│  Phase 1: 에러 수신 및 토픽 발행                                                │
 │                                                                              │
-│  Airflow                    Spring Boot                     Kafka            │
-│  (on_failure_callback)      (ErrorReceiveController)                         │
+│  Airflow                    Spring Boot                     Kafka             │
+│  (on_failure_callback)      (PersistenceController                            │
+│                              + PersistenceServiceImpl)                       │
 │                                                                              │
-│  task_id +          ──►  1. task_id → 에러 유형 판별                           │
-│  error_message(raw)      2. 에러 유형별 Parser로 metadata 추출                  │
-│                          3. StatusLog 저장 (RECEIVED)                         │
-│                          4. 에러 유형별 토픽 발행           ──►  에러 토픽 (5개)  │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
-                                         │
-                                         ▼
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  Phase 2: 에러 유형별 검증 + 자동 조치 (Consumer 4개)                            │
-│                                                                              │
-│  error.livestock-anomaly  ──► LivestockAnomalyConsumer                        │
-│                                    │                                         │
-│                                    ▼                                         │
-│                              LivestockVerificationService                    │
-│                              (M2M HIST 조회 → 자동 판단)                      │
-│                                    │                                         │
-│                          ┌─────────┴──────────┐                              │
-│                          ▼                     ▼                             │
-│                       정상 판단              비정상 판단                         │
-│                          │                     │                             │
-│                          ▼                     ▼                             │
-│                  AirflowClient          MANUAL_REVIEW_REQUIRED                │
-│                  .clearTask()           (운영자가 Airflow UI에서                │
-│                          │               직접 처리 — 이후 추적 없음)             │
-│                          ▼                                                   │
-│                  AUTO_CLEARED /                                              │
-│                  AUTO_CLEAR_FAILED                                           │
-│                                                                              │
-│  ┌──────────────────────────────────────────────────────────┐                │
-│  │ 모든 Consumer는 처리 후 error-notification 토픽 발행 (SMS)  │                │
-│  └──────────────────────────────────────────────────────────┘                │
-│                                                                              │
-│  error.prediction-anomaly ──► PredictionAnomalyConsumer                       │
-│  error.asf-batch-failure  ──► AsfBatchFailureConsumer                         │
-│  error.data-sync-failure  ──► DataSyncFailureConsumer                         │
-│  (자동 검증 미지원 유형은 즉시 MANUAL_REVIEW_REQUIRED + 알림)                     │
+│  POST /api/v1/errors ──►  1. ParserUtil로 errorType + metadata 추출            │
+│  (JSON)                   2. StatusLogUnit.create(StatusLog statusType=RECEIVED)│
+│                           3. KafkaEventProducer.publish() →   ──►  에러 토픽 (9개) │
+│                              ErrorType.topic 으로 라우팅                       │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
                                          │
                                          ▼
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  Phase 3: 알림 발송                                                           │
+│  Phase 2: 에러 유형별 검증 + 자동 조치 (Consumer 2개)                            │
 │                                                                              │
-│  error-notification  ──► NotificationConsumer                                 │
-│                                │                                             │
-│                                ▼                                             │
-│                          NotificationService                                 │
-│                          (SMS 발송)                                           │
+│  error.livestock-anomaly                                                      │
+│      ──► KafkaLivestockErrorEventConsumer                                     │
+│              │                                                                │
+│              ▼                                                                │
+│         StatusLog AUTO_VERIFYING 이력 추가                                     │
+│              │                                                                │
+│              ▼                                                                │
+│         ReaderServiceImpl.analysis()                                          │
+│              │                                                                │
+│              ├──► LivestockHistoryAnalyzer.analyze()                          │
+│              │       (FarmMapper로 HIST 조회 → AnalyzeResultData 반환)         │
+│              │                                                                │
+│              ├──► LsFarmIdFinder.find()                                       │
+│              │       (DPL → LSFARM 농가번호 매핑)                              │
+│              │                                                                │
+│              └──► 결과 분기                                                    │
+│                    ├── LIKELY_NORMAL  → AUTO_CLEARED 이력 추가                 │
+│                    │                    (※ Airflow Clear API 호출은 TODO)      │
+│                    └── 그 외           → MANUAL_REVIEW_REQUIRED 이력 추가       │
+│                                                                              │
+│  분석 미지원 토픽 (notAnalysisTopics 자동 산출)                                │
+│      ──► KafkaEventConsumer                                                   │
+│              └─► 즉시 MANUAL_REVIEW_REQUIRED + JudgementType.UNKNOWN          │
+│                  reason="운영자 검증이 필요한 에러 유형입니다."                   │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
+
+> Phase 3 (SMS 알림) 및 Airflow Clear API 호출은 미구현. TODO로 표시됨.
 ```
 
-> 운영자 승인 워크플로우는 본 시스템에 두지 않습니다. 운영자가 알림(SMS)을 받고 Airflow UI에서 직접 Clear/Mark Success 처리합니다.
+> 운영자 승인 워크플로우는 본 시스템에 두지 않습니다. 운영자가 알림(향후 SMS)을 받고 Airflow UI에서 직접 Clear/Mark Success 처리합니다.
 
 ---
 
@@ -119,323 +108,424 @@ Kafka의 가치는 수신 이후의 **비동기 파이프라인 구간**(디커�
 
 ## 2. Consumer 역할 요약
 
-### 2.1 에러 검증/자동 조치 Consumer (4개)
+### 2.1 에러 검증/자동 조치 Consumer (현재 2개 구현)
 
-4개 Consumer 모두 다음 공통 흐름을 따릅니다. **상태는 갱신이 아니라 새 이력 row를 추가하는 방식(append-only)**으로 기록합니다.
+**상태는 갱신이 아니라 새 이력 row를 추가하는 방식(append-only)**으로 기록합니다.
 
-1. `StatusLog` 이력 추가 (`AUTO_VERIFYING`)
-2. errorType별 검증 로직 수행 (자동 검증을 지원하는 경우)
-3. 정상 판단 시 `AirflowClient.clearTask()` 호출 → `AUTO_CLEARED` / `AUTO_CLEAR_FAILED` 이력 추가
-4. 비정상 또는 자동 검증 미지원 시 → `MANUAL_REVIEW_REQUIRED` 이력 추가
-5. `error-notification` 토픽 발행 (운영자 인지용 SMS)
+`KafkaLivestockErrorEventConsumer` 흐름 (자동 검증 가능 유형):
+
+1. `StatusLog` 이력 추가 (`AUTO_VERIFYING`, `lsfarmId=null`)
+2. `ReaderServiceImpl.analysis()` 호출 — try/catch로 감싸고 finally에서 ack
+   - `LivestockHistoryAnalyzer.analyze()` — HIST 조회 + tolerance 비교 → `AnalyzeResultData(judgementType, reason)` 반환
+   - `LsFarmIdFinder.find()` — DPL→LSFARM 농가번호 매핑
+   - 결과 분기:
+     - `LIKELY_NORMAL` → `AUTO_CLEARED` 이력 추가 (※ Airflow Clear API 호출은 TODO)
+     - 그 외 (`LIKELY_ANOMALY` / `UNKNOWN`) → `MANUAL_REVIEW_REQUIRED` 이력 추가
+3. 예외 발생 시 `log.error` 후 ack (※ MANUAL_REVIEW_REQUIRED 종결 row 추가는 미구현)
+
+`KafkaEventConsumer` 흐름 (분석 미지원 유형 — `ErrorType.notAnalysisTopics()`로 자동 라우팅):
+
+1. 즉시 `MANUAL_REVIEW_REQUIRED` 이력 추가 + `JudgementType.UNKNOWN`
+2. ack
 
 | Consumer | 소비 토픽 | 자동 검증 로직 | 자동 Clear |
 |----------|----------|--------------|----------|
-| `LivestockAnomalyConsumer` | `error.livestock-anomaly` | HIST 테이블 조회 → 근 1년 이력 기반 자동 판단 | ✓ |
-| `PredictionAnomalyConsumer` | `error.prediction-anomaly` | (정책 결정 전 — 즉시 `MANUAL_REVIEW_REQUIRED`) | × |
-| `AsfBatchFailureConsumer` | `error.asf-batch-failure` | 선행 배치 의존성으로 즉시 `MANUAL_REVIEW_REQUIRED` | × |
-| `DataSyncFailureConsumer` | `error.data-sync-failure` | 원천 DB 불일치 — 즉시 `MANUAL_REVIEW_REQUIRED` | × |
+| `KafkaLivestockErrorEventConsumer` | `error.livestock-anomaly` | HIST 조회 + tolerance ×0.5~×2.0 매칭 | △ (이력만 기록, API 호출 TODO) |
+| `KafkaEventConsumer` | `ErrorType.isNeedAnalysis = false` 인 모든 토픽 (예: `error.prediction-anomaly`, `error.asf-batch-failure` 등) | 없음 — 즉시 `MANUAL_REVIEW_REQUIRED` | × |
 
-### 2.2 공통 처리 Consumer (1개)
+### 2.2 공통 처리 Consumer (미구현)
 
 | Consumer | 소비 토픽 | 역할 |
 |----------|----------|------|
-| `NotificationConsumer` | `error-notification` | SMS 알림 발송 |
+| `NotificationConsumer` (TODO) | `error-notification` | SMS 알림 발송 |
 
 ---
 
-## 3. 패키지 구조
+## 3. 패키지 구조 (현재 구현 기준)
 
 ```
 kr.go.kahis.batchmonitor/
 │
-├── Application.java
+├── Application.java                                 ← @SpringBootApplication(exclude = DataSourceAutoConfiguration.class)
 │
 ├── common/
-│   └── config/
-│       ├── PostgresDataSourceConfig.java        ← PostgreSQL + JPA 설정 (@Primary)
-│       └── OracleDataSourceConfig.java          ← Oracle + MyBatis 설정
+│   ├── annotation/
+│   │   ├── TsuId.java                               ← ID 생성 어노테이션
+│   │   └── Unit.java                                ← 영속 단위 컴포넌트 마커
+│   ├── config/
+│   │   ├── PostgresDataSourceConfig.java            ← PostgreSQL + JPA 설정 (@Primary, @EnableJpaAuditing)
+│   │   └── OracleDataSourceConfig.java              ← Oracle + MyBatis 설정
+│   ├── enumeration/
+│   │   └── ErrorType.java                           ← 에러 유형 + topic + isNeedAnalysis
+│   ├── extension/
+│   │   └── UnitDefaultExtension.java
+│   └── generator/
+│       └── TsuIdGenerator.java
 │
 ├── controller/
-│   └── ErrorReceiveController.java              ← Airflow callback 수신 → 토픽 발행
-│
-├── messaging/                                   ← Kafka 이벤트 메시징
-│   ├── consumer/
-│   │   ├── LivestockAnomalyConsumer.java        ← error.livestock-anomaly 소비
-│   │   ├── PredictionAnomalyConsumer.java       ← error.prediction-anomaly 소비
-│   │   ├── AsfBatchFailureConsumer.java         ← error.asf-batch-failure 소비
-│   │   ├── DataSyncFailureConsumer.java         ← error.data-sync-failure 소비
-│   │   └── NotificationConsumer.java            ← error-notification 소비
-│   ├── producer/
-│   │   └── ErrorEventProducer.java              ← Kafka Producer (토픽 발행 공통)
-│   └── dto/                                     ← Kafka 메시지 DTO
-│       ├── ErrorEvent.java                      ← 에러 이벤트
-│       └── NotificationEvent.java               ← 알림 이벤트
-│
-├── persistence/                                 ← 내부 DB 상태 관리 (PostgreSQL)
-│   ├── entity/
-│   │   └── StatusLog.java                       ← 에러 이벤트 상태 로그
-│   └── repository/
-│       └── StatusLogRepository.java
-│
-├── reader/                                      ← 외부 DB 읽기 전용 (Oracle)
-│   └── mapper/
-│       └── LivestockMapper.java
-│
-├── service/
-│   ├── LivestockVerificationService.java        ← HIST 조회 + 자동 판단 + Clear 호출
-│   ├── PredictionVerificationService.java       ← 예측치 검증
-│   ├── AsfVerificationService.java              ← 선행 배치 상태 확인
-│   ├── DataSyncVerificationService.java         ← 행 수 비교 검증
-│   └── NotificationService.java                 ← SMS 발송
-│
-├── parser/
-│   ├── ErrorMessageParser.java                  ← 파서 인터페이스
-│   ├── LivestockErrorParser.java                ← 사육두수 에러 메시지 정규식 파싱
-│   ├── PredictionErrorParser.java               ← 예측치 에러 메시지 정규식 파싱
-│   └── DefaultErrorParser.java                  ← 기본 파서 (파싱 불가 시 원문 보존)
+│   └── PersistenceController.java                   ← Airflow callback 수신 (POST /api/v1/errors)
 │
 ├── dto/
-│   └── AirflowErrorRequest.java                 ← HTTP 요청 DTO
+│   ├── data/
+│   │   └── AnalyzeResultData.java                   ← (judgementType, reason) record
+│   └── request/
+│       └── ErrorRequest.java                        ← Airflow callback 요청 DTO
 │
-└── client/
-    └── AirflowClient.java                       ← OpenFeign Airflow REST API 클라이언트
+├── messaging/
+│   ├── consumer/
+│   │   ├── KafkaConsumer.java                       ← 마커 인터페이스
+│   │   ├── KafkaEventConsumer.java                  ← 분석 미지원 토픽 묶음 처리
+│   │   └── KafkaLivestockErrorEventConsumer.java    ← 사육두수 토픽 전담
+│   ├── dto/
+│   │   └── KafkaEvent.java                          ← Kafka 메시지 record
+│   └── producer/
+│       └── KafkaEventProducer.java
+│
+├── parser/
+│   ├── ParserUtil.java                              ← 정적 파서 (정규식 기반 라우팅)
+│   ├── ParsedError.java
+│   ├── PatternParser.java
+│   └── data/                                        ← 에러 유형별 metadata DTO
+│       ├── LivestockErrorData.java
+│       ├── PredictionErrorData.java
+│       ├── PnuErrorData.java
+│       ├── CoordinateErrorData.java
+│       ├── NotFoundErrorData.java
+│       └── UnknownErrorData.java
+│
+├── persistence/                                     ← 내부 DB (PostgreSQL)
+│   ├── entity/
+│   │   └── StatusLog.java                           ← append-only 이력 엔티티 (lsfarmId 포함)
+│   ├── enumeration/
+│   │   ├── StatusType.java                          ← RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_SUCCESS / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
+│   │   └── JudgementType.java                       ← LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
+│   ├── repository/
+│   │   └── StatusLogRepository.java
+│   └── unit/
+│       ├── StatusLogUnit.java                       ← 영속 단위 인터페이스
+│       └── StatusLogUnitImpl.java                   ← @Unit + @Transactional
+│
+├── reader/                                          ← 외부 DB 읽기 (Oracle, MyBatis)
+│   ├── dto/
+│   │   ├── MobileBreedingLivestockHistoryDto.java
+│   │   ├── FarmIdDplDto.java
+│   │   ├── FarmIdLsfarmDto.java
+│   │   ├── FarmInfoDto.java
+│   │   ├── FarmScaleDto.java
+│   │   └── FarmScaleDetailDto.java
+│   └── mapper/
+│       └── FarmMapper.java
+│
+├── service/
+│   ├── PersistenceService.java / PersistenceServiceImpl.java   ← 수신/파싱/저장/Kafka 발행
+│   ├── ReaderService.java     / ReaderServiceImpl.java         ← 사육두수 분석 오케스트레이션
+│
+└── vo/
+    ├── LivestockHistoryAnalyzer.java                ← FarmMapper 호출 + tolerance 분석
+    └── LsFarmIdFinder.java                          ← DPL → LSFARM 농가번호 변환
 
 resources/
-└── mapper/                                      ← MyBatis XML 매퍼
-    └── LivestockMapper.xml
+├── application.yml / application-local.yml / application-prod.yml
+└── mapper/
+    └── FarmMapper.xml                               ← MyBatis XML
 ```
+
+> Airflow Clear API 호출 클라이언트(`AirflowClient`), `NotificationConsumer`, `error-notification` 토픽은 아직 구현되지 않았습니다.
 
 ---
 
-## 4. 주요 컴포넌트별 코드 설계
+## 4. 주요 컴포넌트별 코드 (현재 구현)
 
-### 4.1 ErrorReceiveController (Airflow callback 수신)
+### 4.1 PersistenceController (Airflow callback 수신)
 
-Airflow `on_failure_callback`에서 HTTP POST로 전송한 에러를 수신합니다.
-`task_id`로 에러 유형을 판별하고, 에러 메시지를 파싱하여 `StatusLog`에 `RECEIVED` 상태로 저장한 뒤 해당 토픽으로 발행합니다.
+Airflow `on_failure_callback`에서 JSON POST로 전송한 에러를 수신합니다.
+`@RequestBody`로 `ErrorRequest` 바인딩 후 `PersistenceServiceImpl.publish()`에 위임하고 `202 Accepted`로 응답합니다.
 
 ```java
 @RestController
-@RequestMapping("/api/v1")
 @RequiredArgsConstructor
-public class ErrorReceiveController {
+public class PersistenceController {
 
-    private final ErrorEventProducer producer;
-    private final StatusLogRepository statusLogRepository;
-    private final Map<String, ErrorMessageParser> parsers;
+  private final PersistenceService service;
 
-    // task_id → 토픽 매핑
-    private static final Map<String, String> TASK_TOPIC_MAP = Map.of(
-        "check_tb_livestock_species_information", "error.livestock-anomaly",
-        "check_tb_prediction_result",             "error.prediction-anomaly"
-        // 매핑 없는 task_id는 "error.data-sync-failure"로 라우팅
-    );
-
-    @PostMapping("/errors")
-    public ResponseEntity<?> receiveError(@RequestBody AirflowErrorRequest request) {
-
-        // 1. task_id → 토픽 결정
-        String topic = TASK_TOPIC_MAP.getOrDefault(
-            request.getTaskId(), "error.data-sync-failure"
-        );
-
-        // 2. 에러 메시지 파싱 (실패 시 빈 metadata)
-        ErrorMessageParser parser = parsers.getOrDefault(
-            request.getTaskId(), new DefaultErrorParser()
-        );
-        Map<String, Object> metadata = parser.parse(request.getErrorMessage());
-
-        // 3. StatusLog 저장 (RECEIVED)
-        String eventId = UUID.randomUUID().toString();
-        statusLogRepository.save(StatusLog.received(eventId, request, metadata));
-
-        // 4. 이벤트 구성 + 토픽 발행
-        ErrorEvent event = ErrorEvent.builder()
-            .eventId(eventId)
-            .dagId(request.getDagId())
-            .taskId(request.getTaskId())
-            .executionDate(request.getExecutionDate())
-            .errorMessage(request.getErrorMessage())
-            .tryNumber(request.getTryNumber())
-            .metadata(metadata)
-            .detectedAt(LocalDateTime.now())
-            .build();
-
-        producer.send(topic, event);
-        return ResponseEntity.ok().build();
-    }
+  @PostMapping("/api/v1/errors")
+  public ResponseEntity<?> publishError(@RequestBody ErrorRequest request) {
+    service.publish(request);
+    return ResponseEntity.accepted().build();
+  }
 }
 ```
 
-### 4.2 ErrorEventProducer (Kafka 발행 공통)
+`ErrorRequest`는 `@JsonProperty` 기반 record (snake_case JSON 키 → camelCase Java 필드 매핑). `executionDate`는 `LocalDate` + `@JsonFormat(pattern = "yyyy-MM-dd")`로 받아 callback의 `context["ds"]` 값과 매칭됩니다.
 
-```java
-@Component
-@RequiredArgsConstructor
-public class ErrorEventProducer {
-
-    private final KafkaTemplate<String, Object> kafkaTemplate;
-
-    public void send(String topic, Object event) {
-        kafkaTemplate.send(topic, event);
-    }
-
-    public void send(String topic, String key, Object event) {
-        kafkaTemplate.send(topic, key, event);
-    }
-}
-```
-
-### 4.3 Consumer 예시 (사육두수)
-
-상태 변화마다 같은 `eventId`로 새 `StatusLog` row를 추가합니다. 단일 row를 갱신하지 않습니다.
-
-```java
-@Component
-@RequiredArgsConstructor
-@Slf4j
-public class LivestockAnomalyConsumer {
-
-    private final LivestockVerificationService verificationService;
-    private final AirflowClient airflowClient;
-    private final ErrorEventProducer producer;
-    private final StatusLogUnit statusLogUnit;
-
-    @KafkaListener(topics = "error.livestock-anomaly", groupId = "kafka-consumer-group")
-    public void consume(ErrorEvent event, Acknowledgment ack) {
-        log.info("[사육두수 이상감지] 수신: farmNumber={}, speciesCode={}",
-            event.getMetadata().get("farmNumber"),
-            event.getMetadata().get("speciesCode"));
-
-        // 1. 자동 검증 시작 이력 추가
-        statusLogUnit.create(StatusLog.builder()
-            .eventId(event.getEventId())
-            .dagId(event.getDagId())
-            .taskId(event.getTaskId())
-            .errorType(event.getErrorType())
-            .errorMessage(event.getErrorMessage())
-            .metadata(event.getMetadata().toString())
-            .statusType(StatusType.AUTO_VERIFYING)
-            .build());
-
-        // 2. HIST 조회 + 자동 판단
-        VerificationResult result = verificationService.verify(event);
-
-        // 3. 결과 분기 — 각 결과마다 이력 row 추가
-        if (result.isNormal()) {
-            try {
-                ClearResponse resp = airflowClient.clearTask(
-                    event.getDagId(), event.getTaskId(), event.getExecutionDate(), false);
-
-                statusLogUnit.create(StatusLog.builder()
-                    .eventId(event.getEventId())
-                    .dagId(event.getDagId())
-                    .taskId(event.getTaskId())
-                    .errorType(event.getErrorType())
-                    .statusType(StatusType.AUTO_CLEARED)
-                    .judgementType(JudgementType.LIKELY_NORMAL)
-                    .reason(result.reason())
-                    .build());
-            } catch (Exception e) {
-                statusLogUnit.create(StatusLog.builder()
-                    .eventId(event.getEventId())
-                    .dagId(event.getDagId())
-                    .taskId(event.getTaskId())
-                    .errorType(event.getErrorType())
-                    .statusType(StatusType.AUTO_CLEAR_FAILED)
-                    .judgementType(JudgementType.LIKELY_NORMAL)
-                    .reason("Clear API 실패: " + e.getMessage())
-                    .build());
-            }
-        } else {
-            statusLogUnit.create(StatusLog.builder()
-                .eventId(event.getEventId())
-                .dagId(event.getDagId())
-                .taskId(event.getTaskId())
-                .errorType(event.getErrorType())
-                .statusType(StatusType.MANUAL_REVIEW_REQUIRED)
-                .judgementType(JudgementType.LIKELY_ANOMALY)
-                .reason(result.reason())
-                .build());
-        }
-
-        // 4. SMS 알림 발행 (운영자 인지용)
-        producer.send("error-notification", event.getEventId(),
-            NotificationEvent.from(event));
-
-        // 5. 수동 ACK
-        ack.acknowledge();
-    }
-}
-```
-
-### 4.4 LivestockVerificationService (HIST 조회 + 자동 판단)
-
-사육두수 이상감지 시 M2M HIST 테이블을 조회하여 자동 판단 결과를 생성합니다. Clear API 호출은 Consumer에서 수행합니다.
+### 4.2 PersistenceServiceImpl (파싱 + 저장 + 토픽 발행)
 
 ```java
 @Service
 @RequiredArgsConstructor
-public class LivestockVerificationService {
+public class PersistenceServiceImpl implements PersistenceService {
 
-    private final JdbcTemplate jdbcTemplate;
+  private final StatusLogUnit statusLogUnit;
+  private final KafkaEventProducer producer;
 
-    public VerificationResult verify(ErrorEvent event) {
-        String farmNumber = (String) event.getMetadata().get("farmNumber");
-        String speciesCode = (String) event.getMetadata().get("speciesCode");
-        double currentValue = ((Number) event.getMetadata().get("currentValue")).doubleValue();
+  @Override
+  @Transactional
+  public void publish(ErrorRequest dto) {
+    ParsedError parsed = ParserUtil.parse(dto.errorMessage());
+    int nowNano = LocalDateTime.now().getNano();
+    String eventId = dto.taskId() + "-" + nowNano;
 
-        // M2M HIST 조회 (근 1년)
-        // geoai DB에 적재된 TN_MOBILE_BLVSTCK_HIST 테이블 조회
-        List<Double> history = jdbcTemplate.queryForList(
-            """
-            SELECT brd_had_co as value
-            FROM tn_mobile_blvstck_hist
-            WHERE frmhs_no = ? AND lstksp_cl = ?
-              AND change_dt >= CURRENT_DATE - INTERVAL '1 year'
-            ORDER BY change_dt DESC
-            """,
-            Double.class,
-            farmNumber, speciesCode
-        );
+    statusLogUnit.create(StatusLog.builder()
+        .eventId(eventId)
+        .dagId(dto.dagId())
+        .taskId(dto.taskId())
+        .errorType(parsed.errorType())
+        .errorMessage(dto.errorMessage())
+        .metadata(parsed.metadata().toString())
+        .statusType(StatusType.RECEIVED)
+        .build());
 
-        // 자동 판단: 근 1년 이력에서 현재값의 50%~200% 범위 내 수치가 있으면 LIKELY_NORMAL
-        boolean normal = history.stream()
-            .anyMatch(v -> v > currentValue * 0.5 && v < currentValue * 2.0);
-
-        AutoJudgement judgement = normal ? AutoJudgement.LIKELY_NORMAL : AutoJudgement.LIKELY_ANOMALY;
-        String reason = normal
-            ? String.format("근 1년 내 %.0f수 범위 이력 존재", currentValue)
-            : String.format("근 1년 내 %.0f수 범위 이력 없음 (오기입 의심)", currentValue);
-
-        return new VerificationResult(judgement, reason);
-    }
+    producer.publish(eventId, dto.dagId(), dto.taskId(), parsed.errorType(),
+        dto.errorMessage(), parsed.metadata());
+  }
 }
 ```
 
-### 4.5 NotificationConsumer (SMS 발송)
+> `eventId`는 현재 `taskId + "-" + LocalDateTime.now().getNano()` 형식으로 생성. 동일 nano 윈도우에서 충돌 가능성이 있어 결정적 키 또는 UUID로 변경하는 것이 향후 개선 후보.
+
+### 4.3 KafkaEventProducer
+
+`ErrorType.topic`으로 라우팅하고 key는 `dagId-taskId-yyyyMMdd` 조합. 콜백으로 발행 결과를 로깅합니다.
+
+```java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class KafkaEventProducer {
+
+  private final KafkaTemplate<String, KafkaEvent> kafkaTemplate;
+
+  public void publish(String eventId, String dagId, String taskId, ErrorType errorType,
+      String errorMessage, Map<String, String> metadata) {
+    String topic = errorType.getTopic();
+    LocalDateTime now = LocalDateTime.now();
+    String key = dagId + "-" + taskId + "-" + now.toLocalDate().toString();
+    KafkaEvent event = new KafkaEvent(eventId, dagId, taskId, errorType, errorMessage,
+        metadata, now);
+
+    kafkaTemplate.send(topic, key, event)
+        .whenComplete((result, throwable) -> {
+          if (throwable != null) {
+            log.error("Kafka publish error: topic={}, eventId={}", topic, eventId, throwable);
+            return;
+          }
+          log.info("Kafka publish success: topic={}, partition={}, offset={}, eventId={}", topic,
+              result.getRecordMetadata().partition(), result.getRecordMetadata().offset(), eventId);
+        });
+  }
+}
+```
+
+### 4.4 KafkaLivestockErrorEventConsumer (사육두수 전담)
+
+`AUTO_VERIFYING` 이력을 먼저 추가하고 분석을 호출합니다. 분석 중 예외 발생 시 로그만 남기고 ack를 보냅니다.
+
+```java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
+
+  private final StatusLogUnit statusLogUnit;
+  private final ReaderService readerService;
+
+  @KafkaListener(
+      topics = "#{T(kr.go.kahis.batchmonitor.common.enumeration.ErrorType).LIVESTOCK_ANOMALY.topic}",
+      groupId = "${spring.kafka.consumer.group-id}"
+  )
+  public void consume(KafkaEvent event, Acknowledgment acknowledgment) {
+    statusLogUnit.create(StatusLog.builder()
+        .eventId(event.eventId())
+        .dagId(event.dagId())
+        .taskId(event.taskId())
+        .lsfarmId(null)
+        .errorType(event.errorType())
+        .errorMessage(event.errorMessage())
+        .metadata(event.metadata().toString())
+        .statusType(StatusType.AUTO_VERIFYING)
+        .judgementType(null)
+        .reason(null)
+        .build());
+
+    try {
+      readerService.analysis(event,
+          event.metadata().get("farmNumber"),
+          event.metadata().get("speciesCode"),
+          Long.parseLong(event.metadata().get("currentValue")));
+    } catch (Exception e) {
+      log.error("Unexpected error during livestock analysis: {}", event.eventId(), e);
+    } finally {
+      acknowledgment.acknowledge();
+    }
+  }
+}
+```
+
+> 예외 발생 시 추가로 `MANUAL_REVIEW_REQUIRED` 종결 row를 남기는 처리는 미구현 — 현재는 `AUTO_VERIFYING` row만 남고 끝납니다.
+
+### 4.5 KafkaEventConsumer (분석 미지원 토픽 묶음)
+
+`ErrorType.notAnalysisTopics()`가 자동으로 산출하는 토픽들을 한 Consumer가 모두 구독합니다.
+
+```java
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class KafkaEventConsumer implements KafkaConsumer {
+
+  private final StatusLogUnit statusLogUnit;
+
+  @KafkaListener(
+      topics = "#{T(kr.go.kahis.batchmonitor.common.enumeration.ErrorType).notAnalysisTopics()}",
+      groupId = "${spring.kafka.consumer.group-id}"
+  )
+  public void consume(KafkaEvent event, Acknowledgment acknowledgment) {
+    statusLogUnit.create(StatusLog.builder()
+        .eventId(event.eventId())
+        .dagId(event.dagId())
+        .taskId(event.taskId())
+        .lsfarmId(null)
+        .errorType(event.errorType())
+        .errorMessage(event.errorMessage())
+        .metadata(event.metadata().toString())
+        .statusType(StatusType.MANUAL_REVIEW_REQUIRED)
+        .judgementType(JudgementType.UNKNOWN)
+        .reason("운영자 검증이 필요한 에러 유형입니다.")
+        .build());
+
+    log.info("receive not need analysis error: eventId={}, type={}", event.eventId(),
+        event.errorType());
+
+    acknowledgment.acknowledge();
+  }
+}
+```
+
+### 4.6 ReaderServiceImpl (분석 오케스트레이션)
+
+```java
+@Service
+@RequiredArgsConstructor
+public class ReaderServiceImpl implements ReaderService {
+
+  private final LivestockHistoryAnalyzer analyzer;
+  private final LsFarmIdFinder finder;
+  private final StatusLogUnit statusLogUnit;
+
+  @Override
+  public void analysis(KafkaEvent event, String farmNumber, String speciesCode, long currentCount) {
+    AnalyzeResultData analyzeResult = analyzer.analyze(farmNumber, speciesCode, currentCount);
+    String lsFarmId = finder.find(farmNumber);
+
+    StatusType statusType = analyzeResult.judgementType() == JudgementType.LIKELY_NORMAL
+        ? StatusType.AUTO_CLEARED
+        : StatusType.MANUAL_REVIEW_REQUIRED;
+
+    statusLogUnit.create(StatusLog.builder()
+        .eventId(event.eventId())
+        .dagId(event.dagId())
+        .taskId(event.taskId())
+        .lsfarmId(lsFarmId)
+        .errorType(event.errorType())
+        .errorMessage(event.errorMessage())
+        .metadata(event.metadata().toString())
+        .statusType(statusType)
+        .judgementType(analyzeResult.judgementType())
+        .reason(analyzeResult.reason())
+        .build());
+
+    // TODO: 정상 판단 시 Airflow Clear API 호출 (운영 환경에서 신뢰성 확보 후)
+  }
+}
+```
+
+> 위 코드는 흐름을 보여주기 위해 if/else 두 빌더 호출을 statusType 변수로 합쳐 단순화한 형태입니다. 실제 코드는 if/else 블록 두 벌로 작성되어 있습니다. `lsFarmId`는 finder가 NPE를 던질 가능성이 있어 분석 흐름 전체를 막을 수 있습니다 — 향후 null 허용 흐름으로 보완 필요.
+
+### 4.7 LivestockHistoryAnalyzer (HIST tolerance 분석)
+
+근 12개월 HIST를 조회하고 `currentCount × [0.5, 2.0]` 범위 내 매칭값 존재 여부로 판단합니다.
 
 ```java
 @Component
 @RequiredArgsConstructor
-@Slf4j
-public class NotificationConsumer {
+public class LivestockHistoryAnalyzer {
 
-    private final NotificationService notificationService;
+  private final FarmMapper mapper;
 
-    @KafkaListener(topics = "error-notification", groupId = "kafka-consumer-group")
-    public void consume(NotificationEvent event, Acknowledgment ack) {
-        log.info("[알림 발송] type={}, title={}", event.getNotificationType(), event.getTitle());
+  public AnalyzeResultData analyze(String farmId, String speciesCode, long currentCount) {
+    List<MobileBreedingLivestockHistoryDto> history =
+        mapper.selectMobileBreedingLivestockHistory(farmId, speciesCode);
 
-        if ("SMS".equals(event.getNotificationType())) {
-            notificationService.sendSms(event.getRecipients(), event.getTitle(), event.getMessage());
-        }
-
-        ack.acknowledge();
+    if (history.isEmpty()) {
+      return new AnalyzeResultData(JudgementType.UNKNOWN, "HIST 부재");
     }
+
+    List<Long> counts = history.stream()
+        .filter(hist -> hist.brdHadCo() != null && hist.lastChangeDt() != null)
+        .sorted(Comparator.comparing(MobileBreedingLivestockHistoryDto::lastChangeDt).reversed())
+        .map(MobileBreedingLivestockHistoryDto::brdHadCo)
+        .toList();
+
+    double low  = currentCount * 0.5;
+    double high = currentCount * 2.0;
+
+    List<Long> matched = counts.stream()
+        .filter(count -> count >= low && count <= high)
+        .toList();
+
+    if (!matched.isEmpty()) {
+      long mostRecent = matched.get(0);              // 정렬 + filter 순서 보존으로 보장
+      long closest = matched.stream()
+          .min(Comparator.comparingLong(c -> Math.abs(c - currentCount)))
+          .orElseThrow();
+      return new AnalyzeResultData(
+          JudgementType.LIKELY_NORMAL,
+          "HIST 정상 — 당일값 " + currentCount
+              + ", 허용범위(×0.5 ~ ×2.0) 내 매칭값 존재 (최근= " + mostRecent
+              + ", 최근접= " + closest + ")");
+    }
+
+    return new AnalyzeResultData(
+        JudgementType.LIKELY_ANOMALY,
+        "HIST 비정상 — 당일값 " + currentCount
+            + ", 허용범위(×0.5 ~ ×2.0) 내 매칭값 미존재");
+  }
 }
 ```
+
+> `currentCount = 0`일 때 동작은 REQUIREMENTS.md 3.5.6 참조. 현재는 별도 분기 없이 HIST에 0이 있으면 자동 Clear 흐름을 탑니다.
+
+### 4.8 LsFarmIdFinder (DPL → LSFARM 농가번호 매핑)
+
+```java
+@Component
+@RequiredArgsConstructor
+public class LsFarmIdFinder {
+
+  private final FarmMapper mapper;
+
+  public String find(String farmId) {
+    String dplFarmId = mapper.selectFarmIdDpl(farmId).frmhsNo();
+    return mapper.selectFarmIdLsfarm(dplFarmId).cntcFrmhsNo();
+  }
+}
+```
+
+> 매퍼 결과가 null이면 `.frmhsNo()` / `.cntcFrmhsNo()`에서 NPE 발생. lsfarmId는 부가 정보이므로 null 허용 흐름으로 향후 보완 후보.
+
+### 4.9 NotificationConsumer (TODO)
+
+`error-notification` 토픽 + SMS 발송 Consumer는 아직 구현되지 않았습니다.
 
 ---
 
@@ -517,70 +607,71 @@ public class DefaultErrorParser implements ErrorMessageParser {
 
 ---
 
-## 6. 컴포넌트 간 데이터 흐름 상세
+## 6. 컴포넌트 간 데이터 흐름 상세 (현재 구현)
 
 ```
 Airflow callback
     │
-    │  POST /api/v1/errors
-    │  { dag_id, task_id, error_message, try_number, ... }
+    │  POST /api/v1/errors  (JSON)
+    │  dag_id, task_id, execution_date, error_message, try_number
     │
     ▼
-ErrorReceiveController ─────────────────────────────────────────────────────────
-    │                                                                           │
-    │  task_id = "check_tb_livestock_species_information"                       │
-    │  → topic = "error.livestock-anomaly"                                      │
-    │  → parser = LivestockErrorParser                                          │
-    │  → metadata = { farmNumber, speciesCode, currentValue, previousValue }    │
-    │                                                                           │
-    ├──► StatusLogRepository.save(StatusLog.received(...))   ← RECEIVED        │
-    │                                                                           │
-    ▼                                                                           │
-ErrorEventProducer.send("error.livestock-anomaly", event)                       │
-    │                                                                           │
-    ▼                                                                           │
-┌─ error.livestock-anomaly (Kafka 토픽) ────────────────────────────────────────┘
-│
-▼
-LivestockAnomalyConsumer
-    │
-    ├──► StatusLog 조회 + markAutoVerifying()         ← AUTO_VERIFYING
-    │
-    ├──► LivestockVerificationService.verify(event)
-    │       │
-    │       │  TN_MOBILE_BLVSTCK_HIST 조회 (근 1년)
-    │       │  → AutoJudgement: LIKELY_NORMAL / LIKELY_ANOMALY
-    │       │
-    │       ▼
-    │    VerificationResult 반환
-    │
-    ├──► 결과 분기
-    │       │
-    │       ├── LIKELY_NORMAL ──► AirflowClient.clearTask()
-    │       │                         │
-    │       │                         ├── 성공 ──► AUTO_CLEARED          (종결)
-    │       │                         └── 실패 ──► AUTO_CLEAR_FAILED     (종결)
-    │       │
-    │       └── LIKELY_ANOMALY ──► MANUAL_REVIEW_REQUIRED                 (종결)
-    │                              (운영자가 Airflow UI에서 직접 처리,
-    │                               이후 본 시스템 추적 없음)
-    │
-    └──► ErrorEventProducer.send("error-notification", noti)
-            │
-            ▼
-         ┌─ error-notification (Kafka 토픽) ────────────────┐
-         │                                                  │
-         ▼                                                  │
-       NotificationConsumer                                 │
-            │                                               │
-            ▼                                               │
-       NotificationService.sendSms(...)                     │
-            │                                               │
-            ▼                                               │
-       담당자 SMS 수신                                       │
-                                                            │
-         └──────────────────────────────────────────────────┘
+PersistenceController ─────────────────────────────────────────────────────────
+    │                                                                          │
+    │  @RequestBody ErrorRequest                                               │
+    │                                                                          │
+    ▼                                                                          │
+PersistenceServiceImpl.publish()                                               │
+    │                                                                          │
+    │  1. ParserUtil.parse(errorMessage) → ParsedError(errorType, metadata)    │
+    │     · 정규식 라우팅: LIVESTOCK_ANOMALY / PREDICTION_ANOMALY /             │
+    │                     PNU_ANOMALY / FARM_COORDINATE_MISSING / ...          │
+    │     · 매칭 실패 시 errorType = UNKNOWN, metadata = {}                     │
+    │                                                                          │
+    │  2. eventId = taskId + LocalDateTime.now().getNano()                     │
+    │                                                                          │
+    │  3. statusLogUnit.create(statusType=RECEIVED, lsfarmId=null)             │
+    │                                                                          │
+    │  4. KafkaEventProducer.publish(...) → ErrorType.topic 으로 라우팅         │
+    │                                                                          │
+    ▼                                                                          │
+202 Accepted ──────────────────────────────────────────────────────────────────┘
+
+       │
+       ▼  (Kafka 토픽들)
+┌──────────────────────────────────────┐    ┌────────────────────────────────┐
+│ error.livestock-anomaly              │    │ error.* (그 외, isNeedAnalysis │
+│  ──► KafkaLivestockErrorEventConsumer│    │      = false 인 모든 토픽)      │
+│                                      │    │  ──► KafkaEventConsumer        │
+└──────────────────────────────────────┘    └────────────────────────────────┘
+       │                                              │
+       ▼                                              ▼
+1. AUTO_VERIFYING 이력 추가                    MANUAL_REVIEW_REQUIRED 이력
+   (lsfarmId=null)                            + JudgementType.UNKNOWN
+       │                                       + reason="운영자 검증이 필요한
+       ▼                                          에러 유형입니다."
+2. ReaderServiceImpl.analysis()                       │
+   try { ... } catch (Exception e) { log }            ▼
+   finally { ack }                                ack (종결)
+       │
+       ├──► LivestockHistoryAnalyzer.analyze()
+       │       FarmMapper.selectMobileBreedingLivestockHistory(farmId, speciesCode)
+       │       → counts (12개월 + null 제거 + lastChangeDt DESC)
+       │       → tolerance ×0.5~×2.0 매칭
+       │       → AnalyzeResultData(judgementType, reason)
+       │
+       ├──► LsFarmIdFinder.find(farmNumber)
+       │       FarmMapper.selectFarmIdDpl → DPL FRMHS_NO
+       │       FarmMapper.selectFarmIdLsfarm → LSFARM CNTC_FRMHS_NO
+       │
+       └──► statusLogUnit.create(...)
+              ├── LIKELY_NORMAL → AUTO_CLEARED 이력 추가
+              │   (※ Airflow Clear API 호출은 TODO)
+              └── 그 외        → MANUAL_REVIEW_REQUIRED 이력 추가
+              그리고 ack
 ```
+
+> SMS 알림(`error-notification` 토픽 + NotificationConsumer)은 아직 구현되지 않았습니다.
 
 ---
 
@@ -656,27 +747,36 @@ CLEARED (운영자 수동 개입 필요 — 종결)
 
 | 상태 | row 추가 시점 | 추가 주체 | 종결 여부 | 설명 |
 |------|------|----------|----------|------|
-| `RECEIVED` | 에러 수신 직후 | `ErrorReceiveController` | × | 첫 이력 row |
-| `AUTO_VERIFYING` | 자동 검증 시작 | Verification Consumer | × | HIST 조회 등 자동 분석 진행 중 |
-| `AUTO_CLEARED` | Airflow Clear API 성공 | Verification Consumer | ✓ | 자동 정상 판단 후 Clear 실행 완료 |
-| `AUTO_CLEAR_FAILED` | Airflow Clear API 실패 | Verification Consumer | ✓ | Clear 호출 자체가 실패 — 운영자 수동 개입 필요 |
-| `MANUAL_REVIEW_REQUIRED` | 자동 판단 불가 / 비정상 | Verification Consumer 또는 `ErrorReceiveController` | ✓ | 운영자가 Airflow에서 직접 처리 — **이후 추적 없음** |
+| `RECEIVED` | 에러 수신 직후 | `PersistenceServiceImpl` | × | 첫 이력 row |
+| `AUTO_VERIFYING` | 자동 검증 시작 | `KafkaLivestockErrorEventConsumer` | × | HIST 조회 등 자동 분석 진행 중 |
+| `AUTO_CLEARED` | 자동 검증 정상 판단 | `ReaderServiceImpl` | ✓ | 정상 판단 완료 (※ Airflow Clear API 호출은 TODO) |
+| `AUTO_CLEAR_SUCCESS` | (예약) Airflow Clear API 성공 | (미구현) | ✓ | Airflow Clear API 호출 도입 시 사용 예정. 현재 미사용 |
+| `AUTO_CLEAR_FAILED` | (예약) Airflow Clear API 실패 | (미구현) | ✓ | Airflow Clear API 도입 시 사용 예정. 현재 미사용 |
+| `MANUAL_REVIEW_REQUIRED` | 자동 판단 불가/비정상 또는 분석 미지원 토픽 | `ReaderServiceImpl` 또는 `KafkaEventConsumer` | ✓ | 운영자가 Airflow에서 직접 처리 — **이후 추적 없음** |
 
 ### 7.4 errorType별 처리 정책
 
-| errorType | 자동 처리 가능? | 동작 |
-|-----------|---------------|------|
-| `LIVESTOCK_ANOMALY` | ✓ | HIST 조회 → 정상 시 Clear, 비정상 시 `MANUAL_REVIEW_REQUIRED` |
-| `PREDICTION_ANOMALY` | △ (정책 결정 필요) | 기본은 `MANUAL_REVIEW_REQUIRED`, 향후 자동 판단 로직 추가 가능 |
-| `ASF_BATCH_FAILURE` | × | 즉시 `MANUAL_REVIEW_REQUIRED` (선행 배치 의존성 때문) |
-| `DATA_SYNC_FAILURE` | × | 즉시 `MANUAL_REVIEW_REQUIRED` (원천 DB 불일치는 사람 확인 필요) |
-| `HPAI_DISPLAY_MISSING` | × | 즉시 `MANUAL_REVIEW_REQUIRED` (수동 등록 유형) |
+`ErrorType.isNeedAnalysis` 플래그로 분석 가능 여부를 enum 자체에 박아두고, `KafkaEventConsumer`는 `notAnalysisTopics()`로 자동 산출된 토픽 목록을 한 번에 구독합니다.
 
-> 자동 처리 정책은 errorType 단위로 enum/설정으로 관리해, 운영 안정화에 따라 단계적으로 자동화 범위를 넓힐 수 있도록 합니다.
+| errorType | `isNeedAnalysis` | Consumer | 동작 |
+|-----------|---------------|----------|------|
+| `LIVESTOCK_ANOMALY` | true | `KafkaLivestockErrorEventConsumer` | HIST 조회 → 정상 시 `AUTO_CLEARED`, 그 외 `MANUAL_REVIEW_REQUIRED` |
+| `PREDICTION_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `FARM_COUNT_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `PNU_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `FARM_COORDINATE_MISSING` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `DATA_NOT_FOUND` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `TRAININGSET_COUNT_MISMATCH` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `CALC_ENV_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
+| `UNKNOWN` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` (파싱 실패 케이스 포함) |
+
+> 향후 분석 가능 errorType이 추가되면 enum의 `isNeedAnalysis = true`로 토글하고 전용 Consumer를 추가하면 됩니다.
 
 ### 7.5 StatusLog 엔티티
 
 append-only 모델이므로 row 갱신 가정의 필드(`statusUpdatedAt`, `clearRequestedAt`, `clearFailureReason` 등)는 두지 않습니다. Clear 결과 등 상태 부가 정보는 해당 상태 row의 `reason`에 함께 기록합니다. `eventId`는 unique가 아니라 시간순 조회를 위한 복합 인덱스(`event_id + create_at`)로만 다룹니다.
+
+`lsfarmId`(방역본부 농장 번호)는 `ReaderServiceImpl`이 `LsFarmIdFinder`로 조회해 같이 적재합니다. 분석을 수행하지 않는 row(예: `RECEIVED`, `AUTO_VERIFYING`, `KafkaEventConsumer`의 `MANUAL_REVIEW_REQUIRED`)에서는 null로 들어갑니다.
 
 ```java
 @Entity
@@ -695,143 +795,67 @@ append-only 모델이므로 row 갱신 가정의 필드(`statusUpdatedAt`, `clea
 @Comment("배치 모니터링 로그 관리 > 로그")
 public class StatusLog {
 
-    @Id
-    @TsuId
-    private String id;
+  @Id
+  @TsuId
+  @Comment("일련 번호")
+  private String id;
 
-    // Kafka 이벤트 식별자 (도메인 키, 같은 eventId의 여러 row가 누적됨)
-    @Column(name = "event_id", nullable = false)
-    private String eventId;
+  // Kafka 이벤트 식별자 (도메인 키, 같은 eventId의 여러 row가 누적됨)
+  @Column(name = "event_id", nullable = false)
+  @Comment("이벤트 일련 번호. taskId-milliseconds")
+  private String eventId;
 
-    // Airflow 발생 정보
-    private String dagId;
-    private String taskId;
+  @Comment("airflow dag 일련 번호")
+  private String dagId;
 
-    @Enumerated(EnumType.STRING)
-    private ErrorType errorType;        // LIVESTOCK_ANOMALY / PREDICTION_ANOMALY / ... / UNKNOWN
+  @Comment("airflow task 일련 번호")
+  private String taskId;
 
-    private String errorMessage;
-    private String metadata;            // Parser 추출 metadata (직렬화된 문자열)
+  @Comment("방역본부 농장 번호")
+  private String lsfarmId;
 
-    // 이 row가 기록한 시점의 상태
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
-    private StatusType statusType;      // RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
+  @Enumerated(EnumType.STRING)
+  @Comment("airflow에서 발생한 에러 유형")
+  private ErrorType errorType;
 
-    // 자동 검증을 수행한 경우의 판단 결과 (해당 row 한정)
-    @Enumerated(EnumType.STRING)
-    private JudgementType judgementType;    // LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
+  @Comment("에러 메시지")
+  private String errorMessage;
 
-    private String reason;              // 판단 근거 또는 Clear 실패 사유 등 상태별 부가 설명
+  @Comment("에러 메시지에서 추출한 메타 데이터")
+  private String metadata;
 
-    @CreatedDate
-    @Column(nullable = false, updatable = false)
-    private LocalDateTime createAt;     // 이 이력 row의 생성 시각 (= 상태 발생 시각)
+  @Column(nullable = false)
+  @Enumerated(EnumType.STRING)
+  @Comment("배치 모니터링 시스템의 상태 유형")
+  private StatusType statusType;
+
+  @Enumerated(EnumType.STRING)
+  @Comment("판단 유형")
+  private JudgementType judgementType;
+
+  @Comment("판단 근거")
+  private String reason;
+
+  @CreatedDate
+  @Column(nullable = false, updatable = false)
+  @Comment("생성 날짜 시간")
+  private LocalDateTime createAt;
+
+  @Builder
+  public StatusLog(String eventId, String dagId, String taskId, String lsfarmId, ErrorType errorType,
+      String errorMessage, String metadata, StatusType statusType, JudgementType judgementType,
+      String reason) { /* ... */ }
 }
 ```
 
 > **연쇄 에러 추적 제거**: 운영자가 Airflow에서 직접 Clear한 이후의 처리는 본 시스템이 알 수 없으므로, 이전 설계에 있던 `parentEventId` / `DOWNSTREAM_FAILED` 개념은 더 이상 유지하지 않습니다. 새 에러는 항상 독립된 이벤트로 기록됩니다.
 
-### 7.6 ErrorReceiveController 처리 흐름
+### 7.6 컴포넌트별 코드 참조
 
-에러 수신 시점에는 errorType만 판별하여 `RECEIVED` 상태로 저장하고, 토픽 발행 후 종료합니다. 자동 검증 가능 여부에 따른 분기는 Consumer 단계에서 수행합니다.
-
-```java
-@PostMapping("/errors")
-public ResponseEntity<?> receiveError(@RequestBody AirflowErrorRequest request) {
-
-    // 1. errorType 판별 + 토픽 결정
-    String topic = TASK_TOPIC_MAP.getOrDefault(request.getTaskId(), "error.data-sync-failure");
-
-    // 2. 에러 메시지 파싱
-    Map<String, Object> metadata = parsers.getOrDefault(
-        request.getTaskId(), new DefaultErrorParser()
-    ).parse(request.getErrorMessage());
-
-    // 3. StatusLog 저장 (RECEIVED)
-    String eventId = UUID.randomUUID().toString();
-    statusLogRepository.save(StatusLog.received(eventId, request, metadata));
-
-    // 4. 토픽 발행
-    ErrorEvent event = ErrorEvent.builder()
-        .eventId(eventId)
-        .dagId(request.getDagId())
-        .taskId(request.getTaskId())
-        .executionDate(request.getExecutionDate())
-        .errorMessage(request.getErrorMessage())
-        .tryNumber(request.getTryNumber())
-        .metadata(metadata)
-        .detectedAt(LocalDateTime.now())
-        .build();
-
-    producer.send(topic, event);
-    return ResponseEntity.ok().build();
-}
-```
-
-### 7.7 Verification Consumer 처리 흐름 (사육두수 예시)
-
-```java
-@KafkaListener(topics = "error.livestock-anomaly", groupId = "kafka-consumer-group")
-public void consume(KafkaEvent event, Acknowledgment ack) {
-
-    // 1. 자동 검증 시작 이력 추가
-    statusLogUnit.create(StatusLog.builder()
-        .eventId(event.eventId())
-        .dagId(event.dagId())
-        .taskId(event.taskId())
-        .errorType(event.errorType())
-        .errorMessage(event.errorMessage())
-        .metadata(event.metadata().toString())
-        .statusType(StatusType.AUTO_VERIFYING)
-        .build());
-
-    // 2. HIST 조회 + 자동 판단
-    VerificationResult result = verificationService.verify(event);
-
-    // 3. 결과에 따른 분기 — 각 결과마다 새 이력 row 추가
-    if (result.isNormal()) {
-        try {
-            ClearResponse resp = airflowClient.clearTask(
-                event.dagId(), event.taskId(), event.executionDate(), false);
-
-            statusLogUnit.create(StatusLog.builder()
-                .eventId(event.eventId())
-                .dagId(event.dagId())
-                .taskId(event.taskId())
-                .errorType(event.errorType())
-                .statusType(StatusType.AUTO_CLEARED)
-                .judgementType(JudgementType.LIKELY_NORMAL)
-                .reason(result.reason())
-                .build());
-        } catch (Exception e) {
-            statusLogUnit.create(StatusLog.builder()
-                .eventId(event.eventId())
-                .dagId(event.dagId())
-                .taskId(event.taskId())
-                .errorType(event.errorType())
-                .statusType(StatusType.AUTO_CLEAR_FAILED)
-                .judgementType(JudgementType.LIKELY_NORMAL)
-                .reason("Clear API 실패: " + e.getMessage())
-                .build());
-        }
-    } else {
-        statusLogUnit.create(StatusLog.builder()
-            .eventId(event.eventId())
-            .dagId(event.dagId())
-            .taskId(event.taskId())
-            .errorType(event.errorType())
-            .statusType(StatusType.MANUAL_REVIEW_REQUIRED)
-            .judgementType(JudgementType.LIKELY_ANOMALY)
-            .reason(result.reason())
-            .build());
-    }
-
-    // 알림 발송 (운영자 인지용)
-    producer.send("error-notification", event.eventId(), NotificationEvent.from(event));
-
-    ack.acknowledge();
-}
-```
-
-자동 검증을 수행하지 않는 errorType의 Consumer는 위 흐름에서 검증/Clear 단계를 생략하고 곧바로 `MANUAL_REVIEW_REQUIRED` row를 추가합니다.
+- 수신/저장/발행 흐름: 4.1 ~ 4.3 (`PersistenceController`, `PersistenceServiceImpl`, `KafkaEventProducer`)
+- 사육두수 분석 Consumer: 4.4 (`KafkaLivestockErrorEventConsumer`)
+- 분석 미지원 토픽 묶음 Consumer: 4.5 (`KafkaEventConsumer`)
+- 분석 오케스트레이션: 4.6 (`ReaderServiceImpl`)
+- HIST tolerance 분석: 4.7 (`LivestockHistoryAnalyzer`)
+- 농가번호 매핑: 4.8 (`LsFarmIdFinder`)
+- SMS 알림: 4.9 (TODO)

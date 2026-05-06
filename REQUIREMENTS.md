@@ -156,6 +156,14 @@ ORDER BY LAST_CHANGE_DT DESC;
 - 운영자가 "사전에 비슷한 사례 존재"라고 판단한 케이스는 모두 `currentValue × [0.5, 2.0]` 범위 안에 HIST값이 존재함.
 - ±50% ~ ×2 룰을 1차 baseline으로 채택. 6.1(자동 패스 금지)을 고려하면 보수적 시작이 안전. 운영 로그 누적 후 종별 조정 가능.
 
+#### 3.5.6 currentCount=0 에지 케이스 (현재 동작)
+
+- tolerance 식 `low = currentCount × 0.5`, `high = currentCount × 2.0` 적용 시 `currentCount = 0`이면 `low = high = 0`이 되어 매칭 범위가 [0, 0]으로 축소됨.
+- 현재 분석기(`LivestockHistoryAnalyzer`)에는 0/음수에 대한 별도 분기가 없으므로 다음과 같이 동작:
+  - HIST에 **0이 존재하면** → matched 비어있지 않음 → `LIKELY_NORMAL` (자동 Clear 대상)
+  - HIST에 **0이 없으면** → matched 빈 리스트 → `LIKELY_ANOMALY`
+- 도메인적으로 `currentCount = 0`은 농장 폐업/데이터 오기입/센서 장애 등 "사육두수 비교 문제"가 아닌 별개 사건일 가능성이 높음. HIST에 0이 우연히 존재할 때 자동 Clear가 발생할 수 있다는 점을 인지 후 운영 로그 누적 시 모니터링 필요.
+
 ---
 
 ## 4. 수동 복구 절차 (현행 Workflow)

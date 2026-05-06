@@ -251,26 +251,31 @@ metadata가 비어있을 뿐, error_message 원문은 보존됩니다.
 
 ## 3. 토픽 목록
 
-### 3.1 에러 감지 토픽 (에러 유형별 분리)
+### 3.1 에러 감지 토픽 (현재 ErrorType enum 기준 — 9개)
 
-| 토픽 이름 | 에러 유형 | 발생 위치 (DAG / Task) | Consumer |
-|-----------|----------|----------------------|----------|
-| `error.livestock-anomaly` | 사육두수 이상감지 | `make_risk_data` / `check_tb_livestock_species_information` | LivestockVerificationService |
-| `error.hpai-display-missing` | 확진농가 HPAI 화면 표출 누락 | 수동 등록 (에러가 발생하지 않는 유형) | HpaiVerificationService |
-| `error.prediction-anomaly` | 예측치 에러 | `make_risk_data` / `check_tb_prediction_result` | PredictionVerificationService |
-| `error.asf-batch-failure` | ASF 배치 에러 | `ASF_일일프로세스` / 각 데이터 처리 Task | AsfVerificationService |
-| `error.data-sync-failure` | 데이터 적재 실패 | `copy_oracle_m2msys` / Oracle→PG 적재 Task | DataSyncVerificationService |
+각 토픽은 `ErrorType` enum의 `topic` 필드로부터 결정되며, `isNeedAnalysis` 플래그에 따라 Consumer가 분기됩니다.
 
-> **참고**: `error.hpai-display-missing`은 Airflow에서 에러가 발생하지 않는 유형입니다.
-> 운영자가 직접 발견 후 REST API를 통해 수동으로 이벤트를 등록합니다.
+| 토픽 이름 | 에러 유형 | `isNeedAnalysis` | 발생 위치 (DAG / Task 예시) | 처리 Consumer |
+|-----------|----------|------------------|---------------------------|--------------|
+| `error.livestock-anomaly` | `LIVESTOCK_ANOMALY` (사육두수 이상감지) | true | `make_risk_data` / `check_tb_livestock_species_information` | `KafkaLivestockErrorEventConsumer` |
+| `error.prediction-anomaly` | `PREDICTION_ANOMALY` (예측치 에러) | false | `make_risk_data` / `check_tb_prediction_result` | `KafkaEventConsumer` |
+| `error.farm-count-anomaly` | `FARM_COUNT_ANOMALY` (농장 개수 이상) | false | `check_tb_diseasecontrol_status_information`, `check_tb_farm_information` | `KafkaEventConsumer` |
+| `error.pnu-anomaly` | `PNU_ANOMALY` (PNU 시도 코드 불일치) | false | `check_tb_farm_information` | `KafkaEventConsumer` |
+| `error.farm-coordinate-missing` | `FARM_COORDINATE_MISSING` (좌표 누락) | false | `check_tb_farm_information` | `KafkaEventConsumer` |
+| `error.data-not-found` | `DATA_NOT_FOUND` (데이터/방역카드/농장정보/축종정보 부재) | false | 다수 check 함수 | `KafkaEventConsumer` |
+| `error.trainingset-count-mismatch` | `TRAININGSET_COUNT_MISMATCH` | false | `check_tb_prediction_result` | `KafkaEventConsumer` |
+| `error.calc-env-anomaly` | `CALC_ENV_ANOMALY` (계산 환경 ratio 이상) | false | `check_calculation_environment_information` | `KafkaEventConsumer` |
+| `error.unknown` | `UNKNOWN` (파서 매칭 실패 / 일반 예외) | false | `Error occurred:` 패턴 등 | `KafkaEventConsumer` |
 
-### 3.2 공통 처리 토픽
+> 현재 enum에는 이전 설계의 `HPAI_DISPLAY_MISSING`, `ASF_BATCH_FAILURE`, `DATA_SYNC_FAILURE`가 없습니다. 추후 필요 시 enum에 추가하면 토픽도 자동 산출됩니다.
+
+### 3.2 공통 처리 토픽 (TODO)
 
 | 토픽 이름 | 용도 | Producer | Consumer |
 |-----------|------|----------|----------|
-| `error-notification` | SMS 등 알림 발송 대상 | 각 VerificationConsumer | NotificationService |
+| `error-notification` (미구현) | SMS 등 알림 발송 대상 | 각 Consumer가 후속 발행 예정 | `NotificationConsumer` (TODO) |
 
-> 운영자 승인 워크플로우를 시스템 내부에 두지 않으므로 `error-review-pending` / `batch-action-request` 토픽은 사용하지 않습니다. 자동 Clear가 가능하면 Verification Consumer가 직접 Airflow API를 호출하고, 그 외에는 운영자가 Airflow UI에서 직접 처리합니다.
+> 운영자 승인 워크플로우를 시스템 내부에 두지 않으므로 `error-review-pending` / `batch-action-request` 토픽은 사용하지 않습니다. 자동 판단이 정상이면 향후 Airflow Clear API를 직접 호출하고(현재 TODO), 그 외에는 운영자가 Airflow UI에서 직접 처리합니다.
 
 ### 3.3 설계 결정 사항
 
@@ -279,15 +284,10 @@ metadata가 비어있을 뿐, error_message 원문은 보존됩니다.
 - 유형별 독립적인 Consumer를 두어 장애 격리 가능
 - 특정 유형만 처리량이 몰릴 때 해당 토픽의 파티션만 확장 가능
 
-**Q. `error.data-sync-failure`를 추가한 이유는?**
-- `copy_oracle_m2msys`에서 Oracle↔PostgreSQL 행 수 불일치 시 ValueError 발생
-- 이 에러가 해결되지 않으면 하위 전체 DAG 체인(`make_risk_data` → ... → `실시간_차량_프로세스`)이 실행되지 않음
-- 빠른 감지와 알림이 필요
-
-**Q. `make_risk_data`의 나머지 check Task들은?**
-- `check_tb_diseasecontrol_status_information`, `check_tb_farm_information`, `check_tb_car_visit_information`, `check_calculation_environment_information`
-- 현재는 빈번하지 않으므로 별도 토픽 없이 `error.data-sync-failure`로 통합 라우팅
-- 빈도가 증가하면 별도 토픽으로 분리 가능
+**Q. check 함수마다 토픽이 따로 있나?**
+- 에러 메시지 정규식 매칭 결과(`ParserUtil`의 `ErrorType` 분류)에 따라 토픽이 결정됩니다.
+- `check_tb_farm_information` 한 task에서도 메시지에 따라 `PNU_ANOMALY` / `FARM_COORDINATE_MISSING` / `FARM_COUNT_ANOMALY` 등 다른 토픽으로 갈릴 수 있습니다.
+- 매칭 실패 시 `UNKNOWN` 토픽으로 라우팅.
 
 **Q. 운영자 승인 토픽(`error-review-pending`)을 두지 않는 이유는?**
 - 운영자가 Airflow UI에서 직접 조치하므로, Spring 측에 별도 승인 화면/큐가 불필요
@@ -297,121 +297,116 @@ metadata가 비어있을 뿐, error_message 원문은 보존됩니다.
 
 ## 4. 메시지 스키마
 
-### 4.1 에러 감지 토픽 (5개 공통 포맷)
+### 4.1 에러 감지 토픽 — 현재 구현 스키마
 
-Airflow `on_failure_callback`에서 Spring API를 거쳐 발행되는 에러 이벤트.
+Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 거쳐 발행되는 `KafkaEvent` (record).
 
-- **Key**: `{dag_id}_{task_id}_{execution_date}` (중복 감지 및 파티션 분배용)
-- **Value**:
+- **Key**: `{dagId}-{taskId}-{yyyy-MM-dd}` (`KafkaEventProducer`에서 `LocalDateTime.now().toLocalDate()` 기준 생성)
+- **Value** (`KafkaEvent` record 직렬화):
 
 ```json
 {
-  "eventId": "uuid",
+  "eventId": "check_tb_livestock_species_information-123456789",
   "dagId": "make_risk_data",
   "taskId": "check_tb_livestock_species_information",
-  "executionDate": "2026-04-08",
   "errorType": "LIVESTOCK_ANOMALY",
   "errorMessage": "00293965의 415006 사육두수 비교에 이상이 감지되었습니다. 당일 사육두수: 63000.0, 전일 사육두수: 62.0",
-  "detectedAt": "2026-04-08 09:30:00",
-  "tryNumber": 1,
   "metadata": {
     "farmNumber": "00293965",
-    "currentValue": 63000.0,
-    "previousValue": 62.0
-  }
+    "speciesCode": "415006",
+    "currentValue": "63000.0",
+    "previousValue": "62.0"
+  },
+  "occurredAt": "2026-04-08T09:30:00"
 }
 ```
 
-**토픽별 errorType 및 발생 위치 매핑:**
+> `eventId`는 현재 `taskId + "-" + LocalDateTime.now().getNano()` 형식 (`PersistenceServiceImpl`). 동일 nano 충돌 가능성이 있어 향후 결정적 키/UUID 도입 후보.
+> `metadata` 값은 모두 문자열입니다 (`Map<String, String>`).
 
-| 토픽 | errorType | 발생 DAG | 발생 Task |
-|------|-----------|---------|----------|
-| `error.livestock-anomaly` | `LIVESTOCK_ANOMALY` | `make_risk_data` | `check_tb_livestock_species_information` |
-| `error.hpai-display-missing` | `HPAI_DISPLAY_MISSING` | - (수동 등록) | - |
-| `error.prediction-anomaly` | `PREDICTION_ANOMALY` | `make_risk_data` | `check_tb_prediction_result` |
-| `error.asf-batch-failure` | `ASF_BATCH_FAILURE` | `ASF_일일프로세스` | 각 데이터 처리 Task |
-| `error.data-sync-failure` | `DATA_SYNC_FAILURE` | `copy_oracle_m2msys` | Oracle→PG 적재 Task |
+**토픽별 errorType 매핑 (현재 ErrorType enum 기준):**
 
-**에러 유형별 metadata 예시:**
+| 토픽 | errorType | `isNeedAnalysis` | 비고 |
+|------|-----------|------------------|------|
+| `error.livestock-anomaly` | `LIVESTOCK_ANOMALY` | true | `KafkaLivestockErrorEventConsumer` 전담 |
+| `error.prediction-anomaly` | `PREDICTION_ANOMALY` | false | `KafkaEventConsumer` 묶음 |
+| `error.farm-count-anomaly` | `FARM_COUNT_ANOMALY` | false | `KafkaEventConsumer` 묶음 |
+| `error.pnu-anomaly` | `PNU_ANOMALY` | false | `KafkaEventConsumer` 묶음 |
+| `error.farm-coordinate-missing` | `FARM_COORDINATE_MISSING` | false | `KafkaEventConsumer` 묶음 |
+| `error.data-not-found` | `DATA_NOT_FOUND` | false | `KafkaEventConsumer` 묶음 |
+| `error.trainingset-count-mismatch` | `TRAININGSET_COUNT_MISMATCH` | false | `KafkaEventConsumer` 묶음 |
+| `error.calc-env-anomaly` | `CALC_ENV_ANOMALY` | false | `KafkaEventConsumer` 묶음 |
+| `error.unknown` | `UNKNOWN` | false | 파서 매칭 실패 시 라우팅 |
+
+**에러 유형별 metadata 예시 (현재 ParserUtil이 추출하는 키):**
+
+모든 값은 문자열입니다 (`Map<String, String>`).
 
 ```json
-// LIVESTOCK_ANOMALY - 사육두수 이상감지
-// 검증 대상 컬럼: M2M.BRD_HAD_CO / DPL.BRD_HAD_CO / LSFARM.BRD_CO
+// LIVESTOCK_ANOMALY
 "metadata": {
   "farmNumber": "00293965",
   "speciesCode": "415006",
-  "speciesName": "산란계(육용)",
-  "currentValue": 63000.0,
-  "previousValue": 62.0
+  "currentValue": "63000.0",
+  "previousValue": "62.0"
 }
 
-// PREDICTION_ANOMALY - 예측치 에러
+// PREDICTION_ANOMALY
 "metadata": {
-  "targetId": "20456536",
-  "currentPrediction": 0.973676,
-  "previousPrediction": 0.816708
+  "farmNumber": "20456536",
+  "currentPrediction": "0.973676",
+  "previousPrediction": "0.816708"
 }
 
-// ASF_BATCH_FAILURE - ASF 배치 에러
-"metadata": {
-  "failedTask": "sp_insert_tb_mother_pig_information",
-  "upstreamDag": "make_risk_data",
-  "upstreamStatus": "failed"
-}
+// PNU_ANOMALY
+"metadata": { "pnuCode": "..." }
 
-// DATA_SYNC_FAILURE - 데이터 적재 실패
-"metadata": {
-  "tableName": "tn_mobile_blvstck_hist",
-  "sourceCount": 150000,
-  "targetCount": 149500,
-  "sourceDb": "M2MSYS (Oracle)"
-}
+// FARM_COORDINATE_MISSING
+"metadata": { "missingFarmCount": "3", "farmList": "..." }
 
-// HPAI_DISPLAY_MISSING - 수동 등록
-"metadata": {
-  "farmNumber": "00123456",
-  "description": "확진농가 HPAI 화면 미표출"
-}
+// DATA_NOT_FOUND
+"metadata": { "standardDate": "2026-03-03", "resource": "축종정보" }
+
+// TRAININGSET_COUNT_MISMATCH
+"metadata": { "standardDate": "2026-03-03" }
+
+// FARM_COUNT_ANOMALY / CALC_ENV_ANOMALY → metadata: {}  (정규식 그룹 없음)
+
+// UNKNOWN — "Error occurred: {e}" 패턴 매칭 시
+"metadata": { "exception": "..." }
+
+// 그 외 모든 매칭 실패 → metadata: {}, errorMessage 원문만 보존
 ```
 
-### 4.2 `error-notification`
+### 4.2 `error-notification` (TODO)
 
-알림 발송 대상 이벤트.
-
-- **Key**: `{eventId}`
-- **Value**:
-
-```json
-{
-  "eventId": "uuid",
-  "notificationType": "SMS",
-  "recipients": ["010-XXXX-XXXX"],
-  "title": "[배치에러] make_risk_data / 사육두수 이상감지",
-  "message": "농가번호: 00293965, 당일: 63000.0, 전일: 62.0. Airflow 확인 필요.",
-  "severity": "HIGH",
-  "createdAt": "2026-04-08 09:30:00"
-}
-```
+알림 발송 대상 이벤트. 현재는 토픽/Producer/Consumer 모두 구현되지 않았으며, 도입 시 스키마 합의 예정.
 
 ---
 
-## 5. 토픽 설정
+## 5. 토픽 설정 (제안)
+
+> 현재 코드는 토픽 자동 생성에 의존하고 별도 운영 설정이 없는 상태입니다. 아래는 도입 시 권장값.
 
 ### 5.1 에러 감지 토픽
 
-| 토픽 | 파티션 수 | Replication Factor | Retention | 비고 |
-|------|----------|-------------------|-----------|------|
-| `error.livestock-anomaly` | 3 | 3 | 7일 | 가장 빈번한 에러 |
-| `error.hpai-display-missing` | 1 | 3 | 7일 | 수동 등록, 발생 빈도 낮음 |
-| `error.prediction-anomaly` | 1 | 3 | 7일 | Task 자체는 진행되므로 낮은 처리량 |
-| `error.asf-batch-failure` | 1 | 3 | 7일 | 사육두수 연쇄 영향으로 발생 |
-| `error.data-sync-failure` | 3 | 3 | 7일 | 적재 테이블이 다수이므로 파티션 분배 |
+| 토픽 | 권장 파티션 수 | Replication Factor | Retention | 비고 |
+|------|--------------|-------------------|-----------|------|
+| `error.livestock-anomaly` | 3 | 3 | 7일 | 가장 빈번한 에러, 분석 부하도 큼 |
+| `error.prediction-anomaly` | 1 | 3 | 7일 | Task 자체는 진행, 처리량 낮음 |
+| `error.farm-count-anomaly` | 1 | 3 | 7일 | |
+| `error.pnu-anomaly` | 1 | 3 | 7일 | |
+| `error.farm-coordinate-missing` | 1 | 3 | 7일 | |
+| `error.data-not-found` | 1 | 3 | 7일 | |
+| `error.trainingset-count-mismatch` | 1 | 3 | 7일 | |
+| `error.calc-env-anomaly` | 1 | 3 | 7일 | |
+| `error.unknown` | 1 | 3 | 14일 | 파서 매칭 실패 — 디버깅 위해 보관기간 길게 |
 
-### 5.2 공통 처리 토픽
+### 5.2 공통 처리 토픽 (TODO)
 
-| 토픽 | 파티션 수 | Replication Factor | Retention | 비고 |
-|------|----------|-------------------|-----------|------|
-| `error-notification` | 1 | 3 | 3일 | 알림은 순서 보장, 단기 보관 |
+| 토픽 | 권장 파티션 수 | Replication Factor | Retention | 비고 |
+|------|--------------|-------------------|-----------|------|
+| `error-notification` (미구현) | 1 | 3 | 3일 | 알림은 순서 보장, 단기 보관 |
 
 - **Replication Factor 3**: 3-node 클러스터이므로 모든 노드에 복제하여 고가용성 확보
 - **Retention**: 이력은 DB에 저장하므로 토픽 보관은 단기로 설정
@@ -422,24 +417,21 @@ Airflow `on_failure_callback`에서 Spring API를 거쳐 발행되는 에러 이
 
 ### 6.1 현재 자동 처리 정책
 
-errorType 단위로 "자동 Clear 가능 / 운영자 수동 처리"를 결정합니다. 운영 안정화 정도에 따라 자동 처리 가능 errorType을 단계적으로 확대합니다.
+`ErrorType.isNeedAnalysis` 플래그로 분석 가능 여부를 결정하고, `KafkaEventConsumer`가 `notAnalysisTopics()`를 자동 산출해 한 번에 구독합니다.
 
-| errorType | 현재 정책 | 확대 조건 |
-|-----------|----------|----------|
-| `LIVESTOCK_ANOMALY` | 자동 Clear (HIST 정상 판단 시) | - |
-| `PREDICTION_ANOMALY` | 운영자 수동 처리 | 자동 판단 로직 합의 후 |
-| `ASF_BATCH_FAILURE` | 운영자 수동 처리 | 선행 배치 자동 복구 가능해진 후 |
-| `DATA_SYNC_FAILURE` | 운영자 수동 처리 | 원천 DB 정합성 자동 검증 가능해진 후 |
-| `HPAI_DISPLAY_MISSING` | 운영자 수동 처리 | (수동 등록 유형) |
+| errorType | `isNeedAnalysis` | 현재 동작 | 확대 조건 |
+|-----------|------------------|----------|----------|
+| `LIVESTOCK_ANOMALY` | true | HIST 조회 + tolerance 분석 → `AUTO_CLEARED` 또는 `MANUAL_REVIEW_REQUIRED` 이력 (※ Airflow Clear API 호출은 TODO) | Airflow Clear API 도입 후 실제 자동 Clear 활성화 |
+| 그 외 모든 errorType | false | 즉시 `MANUAL_REVIEW_REQUIRED` + `JudgementType.UNKNOWN` | 유형별 자동 판단 로직 구현 시 enum 플래그 토글 + 전용 Consumer 추가 |
 
-### 6.2 안전 장치
+### 6.2 안전 장치 (현재/계획)
 
-> **제약**: 사육두수는 위험도에 직결되므로, 잘못된 데이터가 자동 패스되면 안 됨
+> **제약**: 사육두수는 위험도에 직결되므로, 잘못된 데이터가 자동 패스되면 안 됨 (REQUIREMENTS.md 6.1)
 
-- 자동 Clear 호출은 errorType 단위로 ON/OFF 가능 (설정값으로 토글)
-- 자동 Clear 결과(`AUTO_CLEARED` / `AUTO_CLEAR_FAILED`)는 `StatusLog`에 영구 보관 → 사후 정확도 측정
-- Airflow Clear API 호출은 1회만 시도 (실패 시 운영자 수동 개입 — `AUTO_CLEAR_FAILED` 상태로 알림)
-- 자동 처리되었더라도 운영자에게는 알림(SMS)을 항상 발송하여 사후 인지 가능
+- **현재**: `LIVESTOCK_ANOMALY` 분석은 정상 판단 시 `AUTO_CLEARED` 이력만 남기고 실제 Airflow Clear API는 호출하지 않음 (`ReaderServiceImpl`의 TODO). 운영 환경에서 신뢰성 확보 후 단계적 활성화 예정.
+- **현재**: 모든 판단 결과(`AUTO_CLEARED` / `MANUAL_REVIEW_REQUIRED`)는 `StatusLog`에 append-only로 영구 보관 → 사후 정확도 측정 가능.
+- **계획**: Airflow Clear API 도입 시 `AUTO_CLEAR_SUCCESS` / `AUTO_CLEAR_FAILED` 상태 활용 (StatusType enum에 이미 예약).
+- **계획**: SMS 알림(`error-notification` 토픽 + `NotificationConsumer`) 도입 시 자동 처리 케이스에도 운영자 인지를 위해 항상 알림 발송.
 
 ---
 
@@ -478,29 +470,27 @@ FRMHS_NO (CHAR 8)                 FRMHS_SN (NUMBER 13) ← TN_FRMHS.FRMHS_SN
     LSFARM.EAI_TN_FARM_SCALE_DETAIL.FARM_NO → BRD_CO (상세)
 ```
 
-### 7.3 자동 검증 시 조회 순서
+### 7.3 자동 검증 시 조회 순서 (현재 구현)
 
-`LivestockVerificationService`가 사육두수 이상감지 이벤트를 받으면:
+`KafkaLivestockErrorEventConsumer` → `ReaderServiceImpl.analysis()` 흐름:
 
 ```
-1단계: M2M HIST 조회 (자동)
-   SELECT BRD_HAD_CO, CHANGE_DT
-   FROM TN_MOBILE_BLVSTCK_HIST
-   WHERE FRMHS_NO = '{farmNumber}'
-     AND LSTKSP_CL = '{speciesCode}'
-   ORDER BY CHANGE_DT DESC
-   → 근 1년 이력으로 autoJudgement 판단
+1단계: HIST 조회 + tolerance 분석 (LivestockHistoryAnalyzer)
+   FarmMapper.selectMobileBreedingLivestockHistory(farmId, speciesCode)
+   → 12개월 이내, ORDER BY LAST_CHANGE_DT DESC
+   → null/lastChangeDt null 제거 + Java 측 명시 정렬
+   → currentValue × [0.5, 2.0] 매칭값 존재 여부로 LIKELY_NORMAL / LIKELY_ANOMALY
+   → 매칭값 0건이면서 history 자체도 비어 있으면 UNKNOWN
 
-2단계: 이상 판단 시 DPL/LSFARM 교차 검증 (운영자 판단 지원 정보)
-   DPL.TN_BLVSTCK.BRD_HAD_CO 조회
-   → LSFARM 농가번호 매핑 (TN_FARMHS_NO_MAPNG, INSTT_SE_CODE='03')
-   → LSFARM.EAI_TN_FARM_SCALE.BRD_CO 조회
-   → 결과를 verification.crossDbRecords에 포함하여 운영자에게 제시
+2단계: 방역본부 농가번호 매핑 (LsFarmIdFinder, 부가 정보)
+   FarmMapper.selectFarmIdDpl(farmId)        → DPL FRMHS_NO
+   FarmMapper.selectFarmIdLsfarm(dplFarmId)  → LSFARM CNTC_FRMHS_NO
+   → StatusLog.lsfarmId 컬럼에 함께 적재
 ```
 
-> **참고**: 2단계의 DPL/LSFARM 조회는 Oracle DB 접근이 필요하므로,
-> 폐쇄망 내 Spring Boot ↔ Oracle DB 간 방화벽 오픈이 선행되어야 합니다.
-> 방화벽 미오픈 시 1단계(M2M HIST) 조회만으로 운영하고, 2단계는 운영자가 직접 수행합니다.
+`FarmMapper`에는 추가로 `selectFarmInfo`, `selectFarmScale`, `selectFarmScaleDetail`이 정의되어 있어 향후 운영자 판단 지원 정보로 확장 가능.
+
+> **참고**: DPL/LSFARM 조회는 Oracle DB 접근이 필요하므로 폐쇄망 내 방화벽 오픈이 선행되어야 합니다. 미오픈 시 `LsFarmIdFinder`가 NPE 또는 빈 결과로 실패할 수 있습니다.
 
 ---
 
