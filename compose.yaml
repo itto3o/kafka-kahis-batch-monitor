@@ -9,12 +9,17 @@ services:
       - 'POSTGRES_USER=postgres'
     ports:
       - '5432:5432'
+    volumes:
+      # 첫 컨테이너 기동 시 자동 실행: batch_monitor 스키마 생성
+      - ./scripts/local/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
 
   oracle:
-    container_name: "kahis-auth-oracle"
+    container_name: "kahis-batch-monitor-oracle"
     image: 'gvenzl/oracle-free:latest'
     volumes:
       - oracle:/opt/oracle/oradata
+      # 수동 실행용 init 스크립트 (docker exec로 한 번 실행)
+      - ./scripts/local:/scripts:ro
     environment:
       ORACLE_DATABASE: m2msys
       ORACLE_PASSWORD: m2msys
