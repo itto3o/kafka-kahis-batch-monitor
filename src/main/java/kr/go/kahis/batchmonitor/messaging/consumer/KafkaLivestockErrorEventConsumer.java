@@ -40,7 +40,8 @@ public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
 
     try {
       readerService.analysis(event, event.metadata().get("farmNumber"),
-          event.metadata().get("speciesCode"), Long.parseLong(event.metadata().get("currentValue")));
+          event.metadata().get("speciesCode"),
+          (long) Double.parseDouble(event.metadata().get("currentValue")));
     } catch (Exception e) {
       log.error("Unexpected error during livestock analysis: {}", event.eventId(), e);
     } finally {

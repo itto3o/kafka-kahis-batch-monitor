@@ -41,6 +41,7 @@ public class OracleDataSourceConfig {
             new PathMatchingResourcePatternResolver()
                 .getResources("classpath:mapper/**/*.xml")
         );
+        factory.setTypeAliasesPackage("kr.go.kahis.batchmonitor");
 
         org.apache.ibatis.session.Configuration config = new org.apache.ibatis.session.Configuration();
         config.setMapUnderscoreToCamelCase(true);

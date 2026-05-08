@@ -1,3 +1,6 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="kr.go.kahis.batchmonitor.reader.mapper.FarmMapper">
   <select id="selectMobileBreedingLivestockHistory" resultType="MobileBreedingLivestockHistoryDto">
     SELECT
@@ -5,7 +8,7 @@
       LSTKSP_CL,
       BRD_HAD_CO,
       LAST_CHANGE_DT
-    FROM TN_MOBILE_BLVSTCK_HIST
+    FROM TN_MOBILE_BLVSTCK_HIST@M2MSYS
     WHERE FRMHS_NO = #{farmId}
       AND LSTKSP_CL = #{speciesCode}
       AND LAST_CHANGE_DT >= ADD_MONTHS(SYSDATE, -12)
@@ -17,7 +20,7 @@
     WHERE FRMHS_NO IN (
                         SELECT VF.FRMHS_NO
                         FROM VIEW_FRMHS VF, TN_MOBILE_FRMHS_INFO@M2MSYS TMFI
-                        WHERE VFFDB_FRMHS_SN = TMFI.FDB_FRMHS_SN
+                        WHERE VF.FDB_FRMHS_SN = TMFI.FDB_FRMHS_SN
                         AND TMFI.FRMHS_NO = #{farmId}
                       )
   </select>

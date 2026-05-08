@@ -25,7 +25,7 @@ public enum ErrorType {
     this.isNeedAnalysis = isNeedAnalysis;
   }
 
-  public String[] notAnalysisTopics() {
+  public static String[] notAnalysisTopics() {
     return Arrays.stream(ErrorType.values())
         .filter(type -> !type.isNeedAnalysis())
         .map(ErrorType::getTopic)

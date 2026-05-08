@@ -32,7 +32,8 @@ spring:
       password: postgres
       driver-class-name: org.postgresql.Driver
     oracle:
-      url: jdbc:oracle:thin:@localhost:1521/m2msys
+      # 메인 connection은 DPL PDB. 매퍼 SQL의 @M2MSYS, @DL_LSFARM은 DPL에서 만든 DB Link로 다른 PDB 참조
+      url: jdbc:oracle:thin:@localhost:1521/DPL
       username: m2msys
       password: m2msys
       driver-class-name: oracle.jdbc.OracleDriver
