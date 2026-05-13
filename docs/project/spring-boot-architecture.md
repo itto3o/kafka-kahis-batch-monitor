@@ -7,8 +7,8 @@
 │  Phase 1: 에러 수신 및 토픽 발행                                                │
 │                                                                              │
 │  Airflow                    Spring Boot                     Kafka             │
-│  (on_failure_callback)      (PersistenceController                            │
-│                              + PersistenceServiceImpl)                       │
+│  (on_failure_callback)      (StatusLogController                              │
+│                              + StatusLogServiceImpl)                          │
 │                                                                              │
 │  POST /api/v1/errors ──►  1. ParserUtil로 errorType + metadata 추출            │
 │  (JSON)                   2. StatusLogUnit.create(StatusLog statusType=RECEIVED)│
@@ -154,7 +154,9 @@ kr.go.kahis.batchmonitor/
 │   │   └── Unit.java                                ← 영속 단위 컴포넌트 마커
 │   ├── config/
 │   │   ├── PostgresDataSourceConfig.java            ← PostgreSQL + JPA 설정 (@Primary, @EnableJpaAuditing)
-│   │   └── OracleDataSourceConfig.java              ← Oracle + MyBatis 설정
+│   │   ├── OracleDataSourceConfig.java              ← Oracle + MyBatis 설정
+│   │   ├── OpenFeignConfig.java                     ← @EnableFeignClients + Feign 공통 설정
+│   │   └── AirflowClientConfig.java                 ← AirflowClient용 BasicAuth interceptor
 │   ├── enumeration/
 │   │   └── ErrorType.java                           ← 에러 유형 + topic + isNeedAnalysis
 │   ├── extension/
@@ -163,7 +165,7 @@ kr.go.kahis.batchmonitor/
 │       └── TsuIdGenerator.java
 │
 ├── controller/
-│   └── PersistenceController.java                   ← Airflow callback 수신 (POST /api/v1/errors)
+│   └── StatusLogController.java                     ← Airflow callback 수신 (POST /api/v1/errors)
 │
 ├── dto/
 │   ├── data/
@@ -171,54 +173,62 @@ kr.go.kahis.batchmonitor/
 │   └── request/
 │       └── ErrorRequest.java                        ← Airflow callback 요청 DTO
 │
-├── messaging/
-│   ├── consumer/
-│   │   ├── KafkaConsumer.java                       ← 마커 인터페이스
-│   │   ├── KafkaEventConsumer.java                  ← 분석 미지원 토픽 묶음 처리
-│   │   └── KafkaLivestockErrorEventConsumer.java    ← 사육두수 토픽 전담
-│   ├── dto/
-│   │   └── KafkaEvent.java                          ← Kafka 메시지 record
-│   └── producer/
-│       └── KafkaEventProducer.java
-│
-├── parser/
-│   ├── ParserUtil.java                              ← 정적 파서 (정규식 기반 라우팅)
-│   ├── ParsedError.java
-│   ├── PatternParser.java
-│   └── data/                                        ← 에러 유형별 metadata DTO
-│       ├── LivestockErrorData.java
-│       ├── PredictionErrorData.java
-│       ├── PnuErrorData.java
-│       ├── CoordinateErrorData.java
-│       ├── NotFoundErrorData.java
-│       └── UnknownErrorData.java
-│
-├── persistence/                                     ← 내부 DB (PostgreSQL)
-│   ├── entity/
-│   │   └── StatusLog.java                           ← append-only 이력 엔티티 (lsfarmId 포함)
-│   ├── enumeration/
-│   │   ├── StatusType.java                          ← RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_SUCCESS / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
-│   │   └── JudgementType.java                       ← LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
-│   ├── repository/
-│   │   └── StatusLogRepository.java
-│   └── unit/
-│       ├── StatusLogUnit.java                       ← 영속 단위 인터페이스
-│       └── StatusLogUnitImpl.java                   ← @Unit + @Transactional
-│
-├── reader/                                          ← 외부 DB 읽기 (Oracle, MyBatis)
-│   ├── dto/
-│   │   ├── MobileBreedingLivestockHistoryDto.java
-│   │   ├── FarmIdDplDto.java
-│   │   ├── FarmIdLsfarmDto.java
-│   │   ├── FarmInfoDto.java
-│   │   ├── FarmScaleDto.java
-│   │   └── FarmScaleDetailDto.java
-│   └── mapper/
-│       └── FarmMapper.java
+├── domain/
+│   ├── airflow/                                     ← Airflow REST 호출 (Feign)
+│   │   ├── client/
+│   │   │   └── AirflowClient.java                   ← @FeignClient (※ 호출부는 미구현)
+│   │   └── dto/
+│   │       ├── request/TaskClearRequest.java
+│   │       └── response/TaskClearResponse.java
+│   │
+│   ├── kafka/
+│   │   ├── consumer/
+│   │   │   ├── KafkaConsumer.java                   ← 마커 인터페이스
+│   │   │   ├── KafkaEventConsumer.java              ← 분석 미지원 토픽 묶음 처리
+│   │   │   └── KafkaLivestockErrorEventConsumer.java← 사육두수 토픽 전담
+│   │   ├── dto/
+│   │   │   └── KafkaEvent.java                      ← Kafka 메시지 record
+│   │   └── producer/
+│   │       └── KafkaEventProducer.java
+│   │
+│   ├── kahis/                                       ← 외부 DB 읽기 (Oracle, MyBatis)
+│   │   ├── dto/
+│   │   │   ├── MobileBreedingLivestockHistoryDto.java
+│   │   │   ├── FarmIdDplDto.java
+│   │   │   ├── FarmIdLsfarmDto.java
+│   │   │   ├── FarmInfoDto.java
+│   │   │   ├── FarmScaleDto.java
+│   │   │   └── FarmScaleDetailDto.java
+│   │   └── mapper/
+│   │       └── FarmMapper.java
+│   │
+│   ├── parser/                                      ← 에러 메시지 정규식 파싱
+│   │   ├── ParserUtil.java                          ← 정적 파서 (정규식 기반 라우팅)
+│   │   ├── ParsedError.java
+│   │   ├── PatternParser.java
+│   │   └── data/                                    ← 에러 유형별 metadata DTO
+│   │       ├── LivestockErrorData.java
+│   │       ├── PredictionErrorData.java
+│   │       ├── PnuErrorData.java
+│   │       ├── CoordinateErrorData.java
+│   │       ├── NotFoundErrorData.java
+│   │       └── UnknownErrorData.java
+│   │
+│   └── statuslog/                                   ← 내부 DB (PostgreSQL)
+│       ├── entity/
+│       │   └── StatusLog.java                       ← append-only 이력 엔티티 (lsfarmId 포함)
+│       ├── enumeration/
+│       │   ├── StatusType.java                      ← RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_SUCCESS / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
+│       │   └── JudgementType.java                   ← LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
+│       ├── repository/
+│       │   └── StatusLogRepository.java
+│       └── unit/
+│           ├── StatusLogUnit.java                   ← 영속 단위 인터페이스
+│           └── StatusLogUnitImpl.java               ← @Unit + @Transactional
 │
 ├── service/
-│   ├── PersistenceService.java / PersistenceServiceImpl.java   ← 수신/파싱/저장/Kafka 발행
-│   ├── ReaderService.java     / ReaderServiceImpl.java         ← 사육두수 분석 오케스트레이션
+│   ├── StatusLogService.java / StatusLogServiceImpl.java       ← 수신/파싱/저장/Kafka 발행
+│   ├── ReaderService.java    / ReaderServiceImpl.java          ← 사육두수 분석 오케스트레이션
 │
 └── vo/
     ├── LivestockHistoryAnalyzer.java                ← FarmMapper 호출 + tolerance 분석
@@ -230,23 +240,23 @@ resources/
     └── FarmMapper.xml                               ← MyBatis XML
 ```
 
-> Airflow Clear API 호출 클라이언트(`AirflowClient`), `NotificationConsumer`, `error-notification` 토픽은 아직 구현되지 않았습니다.
+> `AirflowClient` (Feign 클라이언트)는 정의되어 있지만 실제 호출 코드는 미연결입니다. `NotificationConsumer`, `error-notification` 토픽은 아직 구현되지 않았습니다.
 
 ---
 
 ## 4. 주요 컴포넌트별 코드 (현재 구현)
 
-### 4.1 PersistenceController (Airflow callback 수신)
+### 4.1 StatusLogController (Airflow callback 수신)
 
 Airflow `on_failure_callback`에서 JSON POST로 전송한 에러를 수신합니다.
-`@RequestBody`로 `ErrorRequest` 바인딩 후 `PersistenceServiceImpl.publish()`에 위임하고 `202 Accepted`로 응답합니다.
+`@RequestBody`로 `ErrorRequest` 바인딩 후 `StatusLogServiceImpl.publish()`에 위임하고 `202 Accepted`로 응답합니다.
 
 ```java
 @RestController
 @RequiredArgsConstructor
-public class PersistenceController {
+public class StatusLogController {
 
-  private final PersistenceService service;
+  private final StatusLogService service;
 
   @PostMapping("/api/v1/errors")
   public ResponseEntity<?> publishError(@RequestBody ErrorRequest request) {
@@ -258,12 +268,12 @@ public class PersistenceController {
 
 `ErrorRequest`는 `@JsonProperty` 기반 record (snake_case JSON 키 → camelCase Java 필드 매핑). `executionDate`는 `LocalDate` + `@JsonFormat(pattern = "yyyy-MM-dd")`로 받아 callback의 `context["ds"]` 값과 매칭됩니다.
 
-### 4.2 PersistenceServiceImpl (파싱 + 저장 + 토픽 발행)
+### 4.2 StatusLogServiceImpl (파싱 + 저장 + 토픽 발행)
 
 ```java
 @Service
 @RequiredArgsConstructor
-public class PersistenceServiceImpl implements PersistenceService {
+public class StatusLogServiceImpl implements StatusLogService {
 
   private final StatusLogUnit statusLogUnit;
   private final KafkaEventProducer producer;
@@ -616,12 +626,12 @@ Airflow callback
     │  dag_id, task_id, execution_date, error_message, try_number
     │
     ▼
-PersistenceController ─────────────────────────────────────────────────────────
+StatusLogController ───────────────────────────────────────────────────────────
     │                                                                          │
     │  @RequestBody ErrorRequest                                               │
     │                                                                          │
     ▼                                                                          │
-PersistenceServiceImpl.publish()                                               │
+StatusLogServiceImpl.publish()                                                 │
     │                                                                          │
     │  1. ParserUtil.parse(errorMessage) → ParsedError(errorType, metadata)    │
     │     · 정규식 라우팅: LIVESTOCK_ANOMALY / PREDICTION_ANOMALY /             │
@@ -747,7 +757,7 @@ CLEARED (운영자 수동 개입 필요 — 종결)
 
 | 상태 | row 추가 시점 | 추가 주체 | 종결 여부 | 설명 |
 |------|------|----------|----------|------|
-| `RECEIVED` | 에러 수신 직후 | `PersistenceServiceImpl` | × | 첫 이력 row |
+| `RECEIVED` | 에러 수신 직후 | `StatusLogServiceImpl` | × | 첫 이력 row |
 | `AUTO_VERIFYING` | 자동 검증 시작 | `KafkaLivestockErrorEventConsumer` | × | HIST 조회 등 자동 분석 진행 중 |
 | `AUTO_CLEARED` | 자동 검증 정상 판단 | `ReaderServiceImpl` | ✓ | 정상 판단 완료 (※ Airflow Clear API 호출은 TODO) |
 | `AUTO_CLEAR_SUCCESS` | (예약) Airflow Clear API 성공 | (미구현) | ✓ | Airflow Clear API 호출 도입 시 사용 예정. 현재 미사용 |
@@ -852,7 +862,7 @@ public class StatusLog {
 
 ### 7.6 컴포넌트별 코드 참조
 
-- 수신/저장/발행 흐름: 4.1 ~ 4.3 (`PersistenceController`, `PersistenceServiceImpl`, `KafkaEventProducer`)
+- 수신/저장/발행 흐름: 4.1 ~ 4.3 (`StatusLogController`, `StatusLogServiceImpl`, `KafkaEventProducer`)
 - 사육두수 분석 Consumer: 4.4 (`KafkaLivestockErrorEventConsumer`)
 - 분석 미지원 토픽 묶음 Consumer: 4.5 (`KafkaEventConsumer`)
 - 분석 오케스트레이션: 4.6 (`ReaderServiceImpl`)

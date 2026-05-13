@@ -1,6 +1,6 @@
 # 프로젝트 구조와 DataSource 매핑 가이드
 
-> 이 문서는 두 데이터소스(JPA / MyBatis) 분리 원칙을 설명합니다. 실제 프로젝트 레이아웃은 `domain/` 도메인 분리 대신 **계층(layer) 분리**(messaging / persistence / reader / vo / parser / service / controller)를 따릅니다. 자세한 현재 구조는 `docs/project/spring-boot-architecture.md` Section 3 참조.
+> 이 문서는 두 데이터소스(JPA / MyBatis) 분리 원칙을 설명합니다. 실제 프로젝트 레이아웃은 **도메인 분리(`domain/airflow`, `domain/kafka`, `domain/kahis`, `domain/parser`, `domain/statuslog`)와 공용 계층(`controller`, `service`, `dto`, `vo`, `common`)을 혼합**해 사용합니다. 자세한 현재 구조는 `docs/project/spring-boot-architecture.md` Section 3 참조.
 
 ## 권장 디렉토리 구조 (도메인 분리 예시 — 참고용)
 
@@ -37,21 +37,22 @@ batchmonitor/
                 └─ PredictionMapper.xml
 ```
 
-## 실제 프로젝트 레이아웃 (계층 분리)
+## 실제 프로젝트 레이아웃 (도메인 + 공용 계층 혼합)
 
-현재 코드는 도메인이 사실상 하나(사육두수 분석 + 에러 라우팅)이고 구성요소를 책임 계층으로 묶는 편이 자연스러워 다음 구조를 사용합니다:
+현재 코드는 외부 시스템 의존성(Airflow / Kafka / Oracle 등)을 `domain/<source>` 아래로 모으고, HTTP/오케스트레이션은 상위 공용 계층에 두는 구조입니다:
 
-- `controller/` — HTTP 진입점 (`PersistenceController`)
-- `service/` — 오케스트레이션 (`PersistenceServiceImpl`, `ReaderServiceImpl`)
-- `messaging/{producer,consumer,dto}/` — Kafka Producer/Consumer + 메시지 DTO
-- `parser/` — 에러 메시지 정규식 파싱 (`ParserUtil` + 패턴/데이터 record)
-- `persistence/{entity,repository,unit,enumeration}/` — PostgreSQL JPA + 영속 단위
-- `reader/{mapper,dto}/` — Oracle MyBatis 매퍼 + 조회 DTO (외부 DB 읽기 전용)
+- `controller/` — HTTP 진입점 (`StatusLogController`)
+- `service/` — 오케스트레이션 (`StatusLogServiceImpl`, `ReaderServiceImpl`)
+- `domain/airflow/{client,dto}/` — Airflow REST 호출 (Feign 클라이언트 + 요청/응답 DTO)
+- `domain/kafka/{producer,consumer,dto}/` — Kafka Producer/Consumer + 메시지 DTO
+- `domain/kahis/{mapper,dto}/` — Oracle MyBatis 매퍼 + 조회 DTO (외부 DB 읽기 전용)
+- `domain/parser/` — 에러 메시지 정규식 파싱 (`ParserUtil` + 패턴/데이터 record)
+- `domain/statuslog/{entity,repository,unit,enumeration}/` — PostgreSQL JPA + 영속 단위
 - `vo/` — 외부 의존(매퍼) + 도메인 로직 결합 컴포넌트 (`LivestockHistoryAnalyzer`, `LsFarmIdFinder`)
 - `dto/{request,data}/` — 컨트롤러 요청 / 내부 데이터 record
 - `common/{annotation,config,enumeration,extension,generator}/` — 공통 인프라
 
-**JPA vs MyBatis 매핑 규칙**은 위 도메인 분리 예시와 동일합니다 (아래 섹션 참조). 패키지 위치만 `domain/xxx/repository`가 아니라 `persistence/repository`로 모인 차이만 있습니다.
+**JPA vs MyBatis 매핑 규칙**은 위 도메인 분리 예시와 동일합니다 (아래 섹션 참조). 패키지 위치만 `domain/xxx/repository`가 아니라 `domain/statuslog/repository`, `domain/kahis/mapper`로 도메인별로 정리되어 있는 차이만 있습니다.
 
 ## 어디에 뭘 넣어야 하는가
 
@@ -101,21 +102,20 @@ public interface LivestockMapper {
        └─ NO (고객사 DB에서 읽기만) → mapper/ + dto/ (Oracle, MyBatis)
 ```
 
-## 스캔 경로가 겹쳐도 괜찮은 이유
+## 스캔 경로 분리 방식
 
-두 Config 모두 `basePackages = "kr.go.kahis.batchmonitor.domain"`을 스캔한다.
-하지만 각각 다른 마커를 찾는다:
+현재 두 Config는 **서로 다른 하위 패키지를 명시적으로 지정**해 충돌 가능성을 처음부터 차단합니다:
 
 ```
-@EnableJpaRepositories  →  JpaRepository를 상속한 인터페이스만 등록
-@MapperScan             →  @Mapper가 붙은 인터페이스만 등록
+PostgresDataSourceConfig:
+  @EnableJpaRepositories(basePackages = "kr.go.kahis.batchmonitor.domain.statuslog.repository")
+  EntityManagerFactory.packages("kr.go.kahis.batchmonitor.domain.statuslog.entity")
+
+OracleDataSourceConfig:
+  @MapperScan(basePackages = "kr.go.kahis.batchmonitor.domain.kahis.mapper")
 ```
 
-같은 패키지 안에 `ErrorEventRepository`(JPA)와 `LivestockMapper`(MyBatis)가 있어도:
-- `ErrorEventRepository`는 JPA가 가져감 (JpaRepository 상속)
-- `LivestockMapper`는 MyBatis가 가져감 (@Mapper 어노테이션)
-
-서로의 대상에 관심이 없으므로 충돌하지 않는다.
+마커(`JpaRepository` 상속, `@Mapper` 어노테이션)로 구분되므로 같은 패키지에 섞여 있어도 안전하지만, 도메인을 패키지 단위로 나눠 둔 덕분에 어떤 도메인을 어떤 데이터소스가 관리하는지 코드만 봐도 명확합니다.
 
 ## 새 도메인 추가 시 체크리스트
 
@@ -126,7 +126,9 @@ public interface LivestockMapper {
    - `domain/farm/mapper/FarmMapper.java` — `@Mapper` 인터페이스
    - `domain/farm/dto/FarmInfo.java` — 조회 결과 DTO
    - `resources/mapper/farm/FarmMapper.xml` — SQL
+   - `OracleDataSourceConfig`의 `@MapperScan(basePackages = ...)`에 새 패키지 추가 (또는 상위 `domain` 단위로 확장)
 3. PostgreSQL 저장이 필요하면:
    - `domain/farm/entity/FarmSyncLog.java` — `@Entity` 클래스
    - `domain/farm/repository/FarmSyncLogRepository.java` — JPA Repository
-4. **Config 수정은 필요 없다** — `domain` 패키지를 통째로 스캔하고 있으므로
+   - `PostgresDataSourceConfig`의 `@EnableJpaRepositories(basePackages = ...)` 및 `EntityManagerFactory.packages(...)`에 새 패키지 추가
+4. 현재 Config는 `domain.kahis.mapper` / `domain.statuslog.{repository,entity}`만 명시적으로 스캔하므로 도메인이 추가될 때마다 Config의 스캔 경로를 함께 갱신해야 합니다.

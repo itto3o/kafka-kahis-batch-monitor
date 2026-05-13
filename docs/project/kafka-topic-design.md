@@ -321,7 +321,7 @@ Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 �
 }
 ```
 
-> `eventId`는 현재 `taskId + "-" + LocalDateTime.now().getNano()` 형식 (`PersistenceServiceImpl`). 동일 nano 충돌 가능성이 있어 향후 결정적 키/UUID 도입 후보.
+> `eventId`는 현재 `taskId + "-" + LocalDateTime.now().getNano()` 형식 (`StatusLogServiceImpl`). 동일 nano 충돌 가능성이 있어 향후 결정적 키/UUID 도입 후보.
 > `metadata` 값은 모두 문자열입니다 (`Map<String, String>`).
 
 **토픽별 errorType 매핑 (현재 ErrorType enum 기준):**
