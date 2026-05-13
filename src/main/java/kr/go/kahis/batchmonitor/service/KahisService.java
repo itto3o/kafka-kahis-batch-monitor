@@ -2,7 +2,7 @@ package kr.go.kahis.batchmonitor.service;
 
 import kr.go.kahis.batchmonitor.domain.kafka.dto.KafkaEvent;
 
-public interface ReaderService {
+public interface KahisService {
 
   /**
    * 분석에 필요한 사육 두수를 조회하고, 분석한다.

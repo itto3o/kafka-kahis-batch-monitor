@@ -13,7 +13,7 @@ import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
-public class ReaderServiceImpl implements ReaderService {
+public class KahisServiceImpl implements KahisService {
 
   private final LivestockHistoryAnalyzer analyzer;
   private final LsFarmIdFinder finder;
