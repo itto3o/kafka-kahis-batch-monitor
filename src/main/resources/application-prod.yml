@@ -4,7 +4,7 @@ spring:
       on-profile: prod
 
   kafka:
-    bootstrap-servers: localhost:9092,localhost:9094,localhost:9096
+    bootstrap-servers: 10.96.41.42:9092,10.96.41.42:9094,10.96.41.42:9096
 
     consumer:
       group-id: kahis-batch-monitor-consumer-group
@@ -27,7 +27,7 @@ spring:
 
   datasource:
     postgres:
-      url: jdbc:postgresql://localhost:5432/postgres
+      url: jdbc:postgresql://10.96.41.42:5432/postgres
       username: postgres
       password: postgres
       driver-class-name: org.postgresql.Driver
