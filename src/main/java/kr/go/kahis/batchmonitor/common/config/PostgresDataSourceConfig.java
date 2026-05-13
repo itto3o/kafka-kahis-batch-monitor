@@ -19,7 +19,7 @@ import jakarta.persistence.EntityManagerFactory;
 @Configuration
 @EnableJpaAuditing
 @EnableJpaRepositories(
-    basePackages = "kr.go.kahis.batchmonitor.persistence.repository",
+    basePackages = "kr.go.kahis.batchmonitor.domain.statuslog.repository",
     entityManagerFactoryRef = "postgresEntityManagerFactory",
     transactionManagerRef = "postgresTransactionManager"
 )
@@ -46,7 +46,7 @@ public class PostgresDataSourceConfig {
             EntityManagerFactoryBuilder builder) {
         return builder
             .dataSource(postgresDataSource())
-            .packages("kr.go.kahis.batchmonitor.persistence.entity")
+            .packages("kr.go.kahis.batchmonitor.domain.statuslog.entity")
             .persistenceUnit("postgres")
             .build();
     }

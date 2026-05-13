@@ -1,6 +1,6 @@
 package kr.go.kahis.batchmonitor.vo;
 
-import kr.go.kahis.batchmonitor.reader.mapper.FarmMapper;
+import kr.go.kahis.batchmonitor.domain.kahis.mapper.FarmMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 

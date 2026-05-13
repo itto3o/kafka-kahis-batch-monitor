@@ -1,11 +1,11 @@
 package kr.go.kahis.batchmonitor.service;
 
 import kr.go.kahis.batchmonitor.dto.data.AnalyzeResultData;
-import kr.go.kahis.batchmonitor.messaging.dto.KafkaEvent;
-import kr.go.kahis.batchmonitor.persistence.entity.StatusLog;
-import kr.go.kahis.batchmonitor.persistence.enumeration.JudgementType;
-import kr.go.kahis.batchmonitor.persistence.enumeration.StatusType;
-import kr.go.kahis.batchmonitor.persistence.unit.StatusLogUnit;
+import kr.go.kahis.batchmonitor.domain.kafka.dto.KafkaEvent;
+import kr.go.kahis.batchmonitor.domain.statuslog.entity.StatusLog;
+import kr.go.kahis.batchmonitor.domain.statuslog.enumeration.JudgementType;
+import kr.go.kahis.batchmonitor.domain.statuslog.enumeration.StatusType;
+import kr.go.kahis.batchmonitor.domain.statuslog.unit.StatusLogUnit;
 import kr.go.kahis.batchmonitor.vo.LivestockHistoryAnalyzer;
 import kr.go.kahis.batchmonitor.vo.LsFarmIdFinder;
 import lombok.RequiredArgsConstructor;

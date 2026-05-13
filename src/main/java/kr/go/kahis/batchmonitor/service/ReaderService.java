@@ -1,6 +1,6 @@
 package kr.go.kahis.batchmonitor.service;
 
-import kr.go.kahis.batchmonitor.messaging.dto.KafkaEvent;
+import kr.go.kahis.batchmonitor.domain.kafka.dto.KafkaEvent;
 
 public interface ReaderService {
 

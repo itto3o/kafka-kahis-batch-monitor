@@ -1,0 +1,17 @@
+package kr.go.kahis.batchmonitor.domain.parser;
+
+import java.util.Map;
+import kr.go.kahis.batchmonitor.common.enumeration.ErrorType;
+
+public record ParsedError(
+    ErrorType errorType,
+    String rawMessage,
+    Map<String, String> metadata
+) {
+
+  public ParsedError {
+    metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+    rawMessage = rawMessage == null ? "" : rawMessage;
+    errorType = errorType == null ? ErrorType.UNKNOWN : errorType;
+  }
+}

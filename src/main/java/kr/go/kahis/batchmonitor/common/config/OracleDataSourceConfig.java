@@ -15,7 +15,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 @Configuration
 @MapperScan(
-    basePackages = "kr.go.kahis.batchmonitor.reader.mapper",
+    basePackages = "kr.go.kahis.batchmonitor.domain.kahis.mapper",
     sqlSessionFactoryRef = "oracleSqlSessionFactory"
 )
 public class OracleDataSourceConfig {

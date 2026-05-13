@@ -3,9 +3,9 @@ package kr.go.kahis.batchmonitor.vo;
 import java.util.Comparator;
 import java.util.List;
 import kr.go.kahis.batchmonitor.dto.data.AnalyzeResultData;
-import kr.go.kahis.batchmonitor.persistence.enumeration.JudgementType;
-import kr.go.kahis.batchmonitor.reader.dto.MobileBreedingLivestockHistoryDto;
-import kr.go.kahis.batchmonitor.reader.mapper.FarmMapper;
+import kr.go.kahis.batchmonitor.domain.statuslog.enumeration.JudgementType;
+import kr.go.kahis.batchmonitor.domain.kahis.dto.MobileBreedingLivestockHistoryDto;
+import kr.go.kahis.batchmonitor.domain.kahis.mapper.FarmMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
