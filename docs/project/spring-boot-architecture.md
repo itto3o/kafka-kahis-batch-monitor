@@ -28,7 +28,7 @@
 │         StatusLog AUTO_VERIFYING 이력 추가                                     │
 │              │                                                                │
 │              ▼                                                                │
-│         ReaderServiceImpl.analysis()                                          │
+│         KahisServiceImpl.analysis()                                          │
 │              │                                                                │
 │              ├──► LivestockHistoryAnalyzer.analyze()                          │
 │              │       (FarmMapper로 HIST 조회 → AnalyzeResultData 반환)         │
@@ -115,7 +115,7 @@ Kafka의 가치는 수신 이후의 **비동기 파이프라인 구간**(디커�
 `KafkaLivestockErrorEventConsumer` 흐름 (자동 검증 가능 유형):
 
 1. `StatusLog` 이력 추가 (`AUTO_VERIFYING`, `lsfarmId=null`)
-2. `ReaderServiceImpl.analysis()` 호출 — try/catch로 감싸고 finally에서 ack
+2. `KahisServiceImpl.analysis()` 호출 — try/catch로 감싸고 finally에서 ack
    - `LivestockHistoryAnalyzer.analyze()` — HIST 조회 + tolerance 비교 → `AnalyzeResultData(judgementType, reason)` 반환
    - `LsFarmIdFinder.find()` — DPL→LSFARM 농가번호 매핑
    - 결과 분기:
@@ -228,7 +228,7 @@ kr.go.kahis.batchmonitor/
 │
 ├── service/
 │   ├── StatusLogService.java / StatusLogServiceImpl.java       ← 수신/파싱/저장/Kafka 발행
-│   ├── ReaderService.java    / ReaderServiceImpl.java          ← 사육두수 분석 오케스트레이션
+│   ├── KahisService.java    / KahisServiceImpl.java          ← 사육두수 분석 오케스트레이션
 │
 └── vo/
     ├── LivestockHistoryAnalyzer.java                ← FarmMapper 호출 + tolerance 분석
@@ -347,7 +347,7 @@ public class KafkaEventProducer {
 public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
 
   private final StatusLogUnit statusLogUnit;
-  private final ReaderService readerService;
+  private final KahisService kahisService;
 
   @KafkaListener(
       topics = "#{T(kr.go.kahis.batchmonitor.common.enumeration.ErrorType).LIVESTOCK_ANOMALY.topic}",
@@ -368,7 +368,7 @@ public class KafkaLivestockErrorEventConsumer implements KafkaConsumer {
         .build());
 
     try {
-      readerService.analysis(event,
+      kahisService.analysis(event,
           event.metadata().get("farmNumber"),
           event.metadata().get("speciesCode"),
           Long.parseLong(event.metadata().get("currentValue")));
@@ -421,12 +421,12 @@ public class KafkaEventConsumer implements KafkaConsumer {
 }
 ```
 
-### 4.6 ReaderServiceImpl (분석 오케스트레이션)
+### 4.6 KahisServiceImpl (분석 오케스트레이션)
 
 ```java
 @Service
 @RequiredArgsConstructor
-public class ReaderServiceImpl implements ReaderService {
+public class KahisServiceImpl implements KahisService {
 
   private final LivestockHistoryAnalyzer analyzer;
   private final LsFarmIdFinder finder;
@@ -660,7 +660,7 @@ StatusLogServiceImpl.publish()                                                 �
    (lsfarmId=null)                            + JudgementType.UNKNOWN
        │                                       + reason="운영자 검증이 필요한
        ▼                                          에러 유형입니다."
-2. ReaderServiceImpl.analysis()                       │
+2. KahisServiceImpl.analysis()                       │
    try { ... } catch (Exception e) { log }            ▼
    finally { ack }                                ack (종결)
        │
@@ -759,10 +759,10 @@ CLEARED (운영자 수동 개입 필요 — 종결)
 |------|------|----------|----------|------|
 | `RECEIVED` | 에러 수신 직후 | `StatusLogServiceImpl` | × | 첫 이력 row |
 | `AUTO_VERIFYING` | 자동 검증 시작 | `KafkaLivestockErrorEventConsumer` | × | HIST 조회 등 자동 분석 진행 중 |
-| `AUTO_CLEARED` | 자동 검증 정상 판단 | `ReaderServiceImpl` | ✓ | 정상 판단 완료 (※ Airflow Clear API 호출은 TODO) |
+| `AUTO_CLEARED` | 자동 검증 정상 판단 | `KahisServiceImpl` | ✓ | 정상 판단 완료 (※ Airflow Clear API 호출은 TODO) |
 | `AUTO_CLEAR_SUCCESS` | (예약) Airflow Clear API 성공 | (미구현) | ✓ | Airflow Clear API 호출 도입 시 사용 예정. 현재 미사용 |
 | `AUTO_CLEAR_FAILED` | (예약) Airflow Clear API 실패 | (미구현) | ✓ | Airflow Clear API 도입 시 사용 예정. 현재 미사용 |
-| `MANUAL_REVIEW_REQUIRED` | 자동 판단 불가/비정상 또는 분석 미지원 토픽 | `ReaderServiceImpl` 또는 `KafkaEventConsumer` | ✓ | 운영자가 Airflow에서 직접 처리 — **이후 추적 없음** |
+| `MANUAL_REVIEW_REQUIRED` | 자동 판단 불가/비정상 또는 분석 미지원 토픽 | `KahisServiceImpl` 또는 `KafkaEventConsumer` | ✓ | 운영자가 Airflow에서 직접 처리 — **이후 추적 없음** |
 
 ### 7.4 errorType별 처리 정책
 
@@ -786,7 +786,7 @@ CLEARED (운영자 수동 개입 필요 — 종결)
 
 append-only 모델이므로 row 갱신 가정의 필드(`statusUpdatedAt`, `clearRequestedAt`, `clearFailureReason` 등)는 두지 않습니다. Clear 결과 등 상태 부가 정보는 해당 상태 row의 `reason`에 함께 기록합니다. `eventId`는 unique가 아니라 시간순 조회를 위한 복합 인덱스(`event_id + create_at`)로만 다룹니다.
 
-`lsfarmId`(방역본부 농장 번호)는 `ReaderServiceImpl`이 `LsFarmIdFinder`로 조회해 같이 적재합니다. 분석을 수행하지 않는 row(예: `RECEIVED`, `AUTO_VERIFYING`, `KafkaEventConsumer`의 `MANUAL_REVIEW_REQUIRED`)에서는 null로 들어갑니다.
+`lsfarmId`(방역본부 농장 번호)는 `KahisServiceImpl`이 `LsFarmIdFinder`로 조회해 같이 적재합니다. 분석을 수행하지 않는 row(예: `RECEIVED`, `AUTO_VERIFYING`, `KafkaEventConsumer`의 `MANUAL_REVIEW_REQUIRED`)에서는 null로 들어갑니다.
 
 ```java
 @Entity
@@ -865,7 +865,7 @@ public class StatusLog {
 - 수신/저장/발행 흐름: 4.1 ~ 4.3 (`StatusLogController`, `StatusLogServiceImpl`, `KafkaEventProducer`)
 - 사육두수 분석 Consumer: 4.4 (`KafkaLivestockErrorEventConsumer`)
 - 분석 미지원 토픽 묶음 Consumer: 4.5 (`KafkaEventConsumer`)
-- 분석 오케스트레이션: 4.6 (`ReaderServiceImpl`)
+- 분석 오케스트레이션: 4.6 (`KahisServiceImpl`)
 - HIST tolerance 분석: 4.7 (`LivestockHistoryAnalyzer`)
 - 농가번호 매핑: 4.8 (`LsFarmIdFinder`)
 - SMS 알림: 4.9 (TODO)

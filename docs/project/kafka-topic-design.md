@@ -428,7 +428,7 @@ Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 �
 
 > **제약**: 사육두수는 위험도에 직결되므로, 잘못된 데이터가 자동 패스되면 안 됨 (REQUIREMENTS.md 6.1)
 
-- **현재**: `LIVESTOCK_ANOMALY` 분석은 정상 판단 시 `AUTO_CLEARED` 이력만 남기고 실제 Airflow Clear API는 호출하지 않음 (`ReaderServiceImpl`의 TODO). 운영 환경에서 신뢰성 확보 후 단계적 활성화 예정.
+- **현재**: `LIVESTOCK_ANOMALY` 분석은 정상 판단 시 `AUTO_CLEARED` 이력만 남기고 실제 Airflow Clear API는 호출하지 않음 (`KahisServiceImpl`의 TODO). 운영 환경에서 신뢰성 확보 후 단계적 활성화 예정.
 - **현재**: 모든 판단 결과(`AUTO_CLEARED` / `MANUAL_REVIEW_REQUIRED`)는 `StatusLog`에 append-only로 영구 보관 → 사후 정확도 측정 가능.
 - **계획**: Airflow Clear API 도입 시 `AUTO_CLEAR_SUCCESS` / `AUTO_CLEAR_FAILED` 상태 활용 (StatusType enum에 이미 예약).
 - **계획**: SMS 알림(`error-notification` 토픽 + `NotificationConsumer`) 도입 시 자동 처리 케이스에도 운영자 인지를 위해 항상 알림 발송.
@@ -472,7 +472,7 @@ FRMHS_NO (CHAR 8)                 FRMHS_SN (NUMBER 13) ← TN_FRMHS.FRMHS_SN
 
 ### 7.3 자동 검증 시 조회 순서 (현재 구현)
 
-`KafkaLivestockErrorEventConsumer` → `ReaderServiceImpl.analysis()` 흐름:
+`KafkaLivestockErrorEventConsumer` → `KahisServiceImpl.analysis()` 흐름:
 
 ```
 1단계: HIST 조회 + tolerance 분석 (LivestockHistoryAnalyzer)

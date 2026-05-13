@@ -42,7 +42,7 @@ batchmonitor/
 현재 코드는 외부 시스템 의존성(Airflow / Kafka / Oracle 등)을 `domain/<source>` 아래로 모으고, HTTP/오케스트레이션은 상위 공용 계층에 두는 구조입니다:
 
 - `controller/` — HTTP 진입점 (`StatusLogController`)
-- `service/` — 오케스트레이션 (`StatusLogServiceImpl`, `ReaderServiceImpl`)
+- `service/` — 오케스트레이션 (`StatusLogServiceImpl`, `KahisServiceImpl`)
 - `domain/airflow/{client,dto}/` — Airflow REST 호출 (Feign 클라이언트 + 요청/응답 DTO)
 - `domain/kafka/{producer,consumer,dto}/` — Kafka Producer/Consumer + 메시지 DTO
 - `domain/kahis/{mapper,dto}/` — Oracle MyBatis 매퍼 + 조회 DTO (외부 DB 읽기 전용)
