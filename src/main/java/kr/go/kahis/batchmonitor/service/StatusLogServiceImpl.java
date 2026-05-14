@@ -2,13 +2,13 @@ package kr.go.kahis.batchmonitor.service;
 
 import jakarta.transaction.Transactional;
 import java.time.LocalDateTime;
-import kr.go.kahis.batchmonitor.dto.request.ErrorRequest;
 import kr.go.kahis.batchmonitor.domain.kafka.producer.KafkaEventProducer;
 import kr.go.kahis.batchmonitor.domain.parser.ParsedError;
 import kr.go.kahis.batchmonitor.domain.parser.ParserUtil;
 import kr.go.kahis.batchmonitor.domain.statuslog.entity.StatusLog;
 import kr.go.kahis.batchmonitor.domain.statuslog.enumeration.StatusType;
 import kr.go.kahis.batchmonitor.domain.statuslog.unit.StatusLogUnit;
+import kr.go.kahis.batchmonitor.dto.request.ErrorRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
