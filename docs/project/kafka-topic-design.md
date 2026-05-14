@@ -275,7 +275,7 @@ metadata가 비어있을 뿐, error_message 원문은 보존됩니다.
 |-----------|------|----------|----------|
 | `error-notification` (미구현) | SMS 등 알림 발송 대상 | 각 Consumer가 후속 발행 예정 | `NotificationConsumer` (TODO) |
 
-> 운영자 승인 워크플로우를 시스템 내부에 두지 않으므로 `error-review-pending` / `batch-action-request` 토픽은 사용하지 않습니다. 자동 판단이 정상이면 향후 Airflow Clear API를 직접 호출하고(현재 TODO), 그 외에는 운영자가 Airflow UI에서 직접 처리합니다.
+> 운영자 승인 워크플로우를 시스템 내부에 두지 않으므로 `error-review-pending` / `batch-action-request` 토픽은 사용하지 않습니다. 자동 판단이 정상이면 `AirflowService`가 Airflow `clearTaskInstances` API를 직접 호출하고, 그 외에는 운영자가 Airflow UI에서 직접 처리합니다.
 
 ### 3.3 설계 결정 사항
 
@@ -421,16 +421,15 @@ Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 �
 
 | errorType | `isNeedAnalysis` | 현재 동작 | 확대 조건 |
 |-----------|------------------|----------|----------|
-| `LIVESTOCK_ANOMALY` | true | HIST 조회 + tolerance 분석 → `AUTO_CLEARED` 또는 `MANUAL_REVIEW_REQUIRED` 이력 (※ Airflow Clear API 호출은 TODO) | Airflow Clear API 도입 후 실제 자동 Clear 활성화 |
+| `LIVESTOCK_ANOMALY` | true | HIST 조회 + tolerance 분석 → 정상 시 `AUTO_CLEARED` → `AirflowService.clear()` → `AUTO_CLEAR_SUCCESS`/`AUTO_CLEAR_FAILED`. 비정상/판단불가 시 `MANUAL_REVIEW_REQUIRED` | — |
 | 그 외 모든 errorType | false | 즉시 `MANUAL_REVIEW_REQUIRED` + `JudgementType.UNKNOWN` | 유형별 자동 판단 로직 구현 시 enum 플래그 토글 + 전용 Consumer 추가 |
 
 ### 6.2 안전 장치 (현재/계획)
 
 > **제약**: 사육두수는 위험도에 직결되므로, 잘못된 데이터가 자동 패스되면 안 됨 (REQUIREMENTS.md 6.1)
 
-- **현재**: `LIVESTOCK_ANOMALY` 분석은 정상 판단 시 `AUTO_CLEARED` 이력만 남기고 실제 Airflow Clear API는 호출하지 않음 (`KahisServiceImpl`의 TODO). 운영 환경에서 신뢰성 확보 후 단계적 활성화 예정.
-- **현재**: 모든 판단 결과(`AUTO_CLEARED` / `MANUAL_REVIEW_REQUIRED`)는 `StatusLog`에 append-only로 영구 보관 → 사후 정확도 측정 가능.
-- **계획**: Airflow Clear API 도입 시 `AUTO_CLEAR_SUCCESS` / `AUTO_CLEAR_FAILED` 상태 활용 (StatusType enum에 이미 예약).
+- **현재**: `LIVESTOCK_ANOMALY` 분석에서 정상 판단 시 `AUTO_CLEARED` 이력을 남기고 `AirflowService.clear()`로 Airflow `clearTaskInstances` API를 호출. 응답에 따라 `AUTO_CLEAR_SUCCESS`(`taskInstances` 1건 이상) 또는 `AUTO_CLEAR_FAILED`(Feign 예외 또는 빈 `taskInstances`)로 종결. 요청 시 `only_failed=true`, `include_downstream=true`, `reset_dag_runs=true`로 downstream task와 DAG run까지 함께 재개됨.
+- **현재**: 모든 종결 결과(`AUTO_CLEAR_SUCCESS` / `AUTO_CLEAR_FAILED` / `MANUAL_REVIEW_REQUIRED`)는 `StatusLog`에 append-only로 영구 보관 → 사후 정확도 측정 가능.
 - **계획**: SMS 알림(`error-notification` 토픽 + `NotificationConsumer`) 도입 시 자동 처리 케이스에도 운영자 인지를 위해 항상 알림 발송.
 
 ---
