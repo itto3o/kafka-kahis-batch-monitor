@@ -13,7 +13,9 @@ public final class ParserUtil {
 
   private static final List<PatternParser> PATTERN_PARSERS = List.of(
       parser(ErrorType.LIVESTOCK_ANOMALY,
-          "^(.+?)의\\s+(.+?)\\s+사육두수 비교에 이상이 감지되었습니다\\.\\s*당일 사육두수:\\s*([\\d.]+),\\s*전일 사육두수:\\s*([\\d.]+)$",
+          // 사육두수는 도메인적으로 항상 정수(마리 단위)이지만, check 함수가 float로 처리 후 raise하므로
+          // 메시지에 "3500.0" 같이 .0이 따라붙음. 정수부만 캡쳐하고 .소수부는 매칭만 함(metadata에는 미포함).
+          "^(.+?)의\\s+(.+?)\\s+사육두수 비교에 이상이 감지되었습니다\\.\\s*당일 사육두수:\\s*(\\d+)(?:\\.\\d+)?,\\s*전일 사육두수:\\s*(\\d+)(?:\\.\\d+)?$",
           matcher -> metadata(
               "farmNumber", matcher.group(1).trim(),
               "speciesCode", matcher.group(2).trim(),
