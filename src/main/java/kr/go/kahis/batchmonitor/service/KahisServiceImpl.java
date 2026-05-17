@@ -1,6 +1,6 @@
 package kr.go.kahis.batchmonitor.service;
 
-import kr.go.kahis.batchmonitor.domain.airflow.dto.response.TaskClearResponse;
+import kr.go.kahis.batchmonitor.domain.airflow.dto.response.TaskMarkSuccessResponse;
 import kr.go.kahis.batchmonitor.dto.data.AnalyzeResultData;
 import kr.go.kahis.batchmonitor.domain.kafka.dto.KafkaEvent;
 import kr.go.kahis.batchmonitor.domain.statuslog.entity.StatusLog;
@@ -43,20 +43,20 @@ public class KahisServiceImpl implements KahisService {
     }
 
     // 정상 판단 로그 저장
-    saveStatusLog(event, lsFarmId, analyzeResult, StatusType.AUTO_CLEARED);
+    saveStatusLog(event, lsFarmId, analyzeResult, StatusType.AUTO_VERIFIED);
 
-    // Airflow Clear API 호출 및 결과 로그 저장
-    StatusType clearStatus;
+    // Airflow Mark Success API 호출 및 결과 로그 저장
+    StatusType markStatus;
     try {
-      TaskClearResponse clearResponse = airflowService.clear(event);
-      clearStatus = clearResponse.taskInstances().isEmpty()
-          ? StatusType.AUTO_CLEAR_FAILED
-          : StatusType.AUTO_CLEAR_SUCCESS;
+      TaskMarkSuccessResponse response = airflowService.markSuccess(event);
+      markStatus = response.taskInstances().isEmpty()
+          ? StatusType.AUTO_MARK_SUCCESS_FAILED
+          : StatusType.AUTO_MARK_SUCCESS;
     } catch (RuntimeException e) {
-      log.error("Airflow Clear API 호출 실패: eventId={}", event.eventId(), e);
-      clearStatus = StatusType.AUTO_CLEAR_FAILED;
+      log.error("Airflow Mark Success API 호출 실패: eventId={}", event.eventId(), e);
+      markStatus = StatusType.AUTO_MARK_SUCCESS_FAILED;
     }
-    saveStatusLog(event, lsFarmId, analyzeResult, clearStatus);
+    saveStatusLog(event, lsFarmId, analyzeResult, markStatus);
   }
 
   private void saveStatusLog(KafkaEvent event, String lsFarmId, AnalyzeResultData analyzeResult,

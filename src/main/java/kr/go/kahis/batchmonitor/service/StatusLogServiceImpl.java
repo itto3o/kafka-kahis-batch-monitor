@@ -45,7 +45,7 @@ public class StatusLogServiceImpl implements StatusLogService {
         .build());
 
     // publish
-    producer.publish(eventId, dto.dagId(), dto.taskId(), dto.executionDate(),
+    producer.publish(eventId, dto.dagId(), dto.taskId(), dto.dagRunId(),
         parsed.errorType(), dto.errorMessage(), parsed.metadata());
   }
 }

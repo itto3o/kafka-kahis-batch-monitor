@@ -1,6 +1,5 @@
 package kr.go.kahis.batchmonitor.domain.kafka.producer;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.Map;
 import kr.go.kahis.batchmonitor.common.enumeration.ErrorType;
@@ -17,12 +16,12 @@ public class KafkaEventProducer {
 
   private final KafkaTemplate<String, KafkaEvent> kafkaTemplate;
 
-  public void publish(String eventId, String dagId, String taskId, LocalDate executionDate,
+  public void publish(String eventId, String dagId, String taskId, String dagRunId,
       ErrorType errorType, String errorMessage, Map<String, String> metadata) {
     String topic = errorType.getTopic();
     LocalDateTime now = LocalDateTime.now();
     String key = dagId + "-" + taskId + "-" + now.toLocalDate().toString();
-    KafkaEvent event = new KafkaEvent(eventId, dagId, taskId, executionDate, errorType,
+    KafkaEvent event = new KafkaEvent(eventId, dagId, taskId, dagRunId, errorType,
         errorMessage, metadata, now);
 
     kafkaTemplate.send(topic, key, event)
