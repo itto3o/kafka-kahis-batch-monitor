@@ -1,8 +1,36 @@
 name: kahis-batch-monitor
+
+x-airflow-common: &airflow-common
+  build:
+    context: ./infra/airflow
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    AIRFLOW_VAR_KAFKA_ERROR_CALLBACK_URL: http://host.docker.internal:8080/api/v1/errors
+    # E2E DAG가 사용하는 Connection (UI 등록 불필요)
+    AIRFLOW_CONN_POSTGRES_LOCAL: postgresql://postgres:postgres@postgres:5432/postgres
+    AIRFLOW_CONN_ORACLE_M2M: oracle://m2msys:m2msys@oracle:1521/M2MSYS
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./checks:/opt/airflow/dags/ai_project
+    - airflow-logs:/opt/airflow/logs
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  networks:
+    - bridge
+  depends_on:
+    postgres:
+      condition: service_healthy
+
 services:
   postgres:
     container_name: "kahis-batch-monitor-postgres"
-    image: 'postgres:latest'
+    image: 'postgres:13'
     environment:
       - 'POSTGRES_DB=postgres'
       - 'POSTGRES_PASSWORD=postgres'
@@ -10,8 +38,16 @@ services:
     ports:
       - '5432:5432'
     volumes:
-      # 첫 컨테이너 기동 시 자동 실행: batch_monitor 스키마 생성
+      # 첫 컨테이너 기동 시 자동 실행: batch_monitor 스키마 + Airflow 메타 DB 생성
       - ./scripts/local/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./scripts/local/postgres-airflow-init.sql:/docker-entrypoint-initdb.d/02-airflow.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - bridge
 
   oracle:
     container_name: "kahis-batch-monitor-oracle"
@@ -97,6 +133,53 @@ services:
     volumes:
       - kafka-third-data:/var/lib/kafka/data
 
+  # ============================================================
+  # Airflow 2.6.2 (LocalExecutor)
+  #   - 메타DB: postgres 서비스의 'airflow' DB (postgres-airflow-init.sql로 생성)
+  #   - DAG: ./dags 디렉토리 마운트
+  #   - check 함수: ./checks → ./dags/ai_project 로 매핑 (DAG의 `from ai_project.*` import 충족)
+  #   - on_failure_callback이 host의 Spring(localhost:8080) 호출 가능하도록 host.docker.internal 사용
+  # ============================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: "kahis-batch-monitor-airflow-init"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init && \
+        airflow users create \
+          --username admin --password admin \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@example.com || true
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: "kahis-batch-monitor-airflow-webserver"
+    command: webserver
+    ports:
+      - "8088:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: "kahis-batch-monitor-airflow-scheduler"
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+
 networks:
   kafka-net:
     driver: bridge
@@ -108,3 +191,4 @@ volumes:
   kafka-second-data:
   kafka-third-data:
   oracle:
+  airflow-logs:

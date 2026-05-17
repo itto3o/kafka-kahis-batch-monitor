@@ -1,0 +1,5 @@
+apache-airflow-providers-oracle==3.7.2
+apache-airflow-providers-postgres==5.5.1
+apache-airflow-providers-http==4.4.2
+oracledb==2.0.1
+requests==2.31.0
