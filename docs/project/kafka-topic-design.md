@@ -77,7 +77,8 @@ region_risk_process (트리거)
        │                          │
        │  ① StatusLog 상태 갱신     │
        │  ② HIST 분석 (가능한 경우)  │
-       │  ③ 정상 → Airflow Clear   │
+       │  ③ 정상 → Airflow Mark    │
+       │     Success API 호출       │
        │     비정상/미지원 →        │
        │     MANUAL_REVIEW_REQUIRED │
        │  ④ error-notification 발행 │
@@ -113,7 +114,7 @@ def on_task_failure(context):
     requests.post("http://spring-boot-host:8080/api/v1/errors", json={
         "dag_id": context["dag"].dag_id,
         "task_id": context["task_instance"].task_id,
-        "execution_date": str(context["execution_date"]),
+        "dag_run_id": context["dag_run"].run_id,
         "error_message": str(context["exception"]),
         "try_number": context["task_instance"].try_number,
     })
@@ -275,7 +276,7 @@ metadata가 비어있을 뿐, error_message 원문은 보존됩니다.
 |-----------|------|----------|----------|
 | `error-notification` (미구현) | SMS 등 알림 발송 대상 | 각 Consumer가 후속 발행 예정 | `NotificationConsumer` (TODO) |
 
-> 운영자 승인 워크플로우를 시스템 내부에 두지 않으므로 `error-review-pending` / `batch-action-request` 토픽은 사용하지 않습니다. 자동 판단이 정상이면 `AirflowService`가 Airflow `clearTaskInstances` API를 직접 호출하고, 그 외에는 운영자가 Airflow UI에서 직접 처리합니다.
+> 운영자 승인 워크플로우를 시스템 내부에 두지 않으므로 `error-review-pending` / `batch-action-request` 토픽은 사용하지 않습니다. 자동 판단이 정상이면 `AirflowService`가 Airflow `updateTaskInstancesState` API (`new_state="success"`)를 직접 호출 — 운영 SM이 UI에서 "Mark as Success"를 누르는 것과 동일한 효과. 그 외에는 운영자가 Airflow UI에서 직접 처리합니다.
 
 ### 3.3 설계 결정 사항
 
@@ -291,7 +292,7 @@ metadata가 비어있을 뿐, error_message 원문은 보존됩니다.
 
 **Q. 운영자 승인 토픽(`error-review-pending`)을 두지 않는 이유는?**
 - 운영자가 Airflow UI에서 직접 조치하므로, Spring 측에 별도 승인 화면/큐가 불필요
-- 자동 Clear 가능 케이스만 시스템이 처리하고 나머지는 사람에게 위임 — 책임 경계를 단순화
+- 자동 Mark Success 가능 케이스만 시스템이 처리하고 나머지는 사람에게 위임 — 책임 경계를 단순화
 
 ---
 
@@ -309,6 +310,7 @@ Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 �
   "eventId": "check_tb_livestock_species_information-123456789",
   "dagId": "make_risk_data",
   "taskId": "check_tb_livestock_species_information",
+  "dagRunId": "scheduled__2026-04-08T00:00:00+00:00",
   "errorType": "LIVESTOCK_ANOMALY",
   "errorMessage": "00293965의 415006 사육두수 비교에 이상이 감지되었습니다. 당일 사육두수: 63000.0, 전일 사육두수: 62.0",
   "metadata": {
@@ -320,6 +322,8 @@ Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 �
   "occurredAt": "2026-04-08T09:30:00"
 }
 ```
+
+> `dagRunId`는 Airflow `context["dag_run"].run_id`를 그대로 전달받은 값입니다. Airflow Mark Success API(`updateTaskInstancesState`)에서 `execution_date`와 상호배타로 사용되며, 본 시스템은 timezone/format 변환 실수가 없는 `dagRunId`를 채택했습니다.
 
 > `eventId`는 현재 `taskId + "-" + LocalDateTime.now().getNano()` 형식 (`StatusLogServiceImpl`). 동일 nano 충돌 가능성이 있어 향후 결정적 키/UUID 도입 후보.
 > `metadata` 값은 모두 문자열입니다 (`Map<String, String>`).
@@ -421,15 +425,15 @@ Airflow `on_failure_callback`에서 Spring API(`POST /api/v1/errors`, JSON)를 �
 
 | errorType | `isNeedAnalysis` | 현재 동작 | 확대 조건 |
 |-----------|------------------|----------|----------|
-| `LIVESTOCK_ANOMALY` | true | HIST 조회 + tolerance 분석 → 정상 시 `AUTO_CLEARED` → `AirflowService.clear()` → `AUTO_CLEAR_SUCCESS`/`AUTO_CLEAR_FAILED`. 비정상/판단불가 시 `MANUAL_REVIEW_REQUIRED` | — |
+| `LIVESTOCK_ANOMALY` | true | HIST 조회 + tolerance 분석 → 정상 시 `AUTO_VERIFIED` → `AirflowService.markSuccess()` → `AUTO_MARK_SUCCESS`/`AUTO_MARK_SUCCESS_FAILED`. 비정상/판단불가 시 `MANUAL_REVIEW_REQUIRED` | — |
 | 그 외 모든 errorType | false | 즉시 `MANUAL_REVIEW_REQUIRED` + `JudgementType.UNKNOWN` | 유형별 자동 판단 로직 구현 시 enum 플래그 토글 + 전용 Consumer 추가 |
 
 ### 6.2 안전 장치 (현재/계획)
 
 > **제약**: 사육두수는 위험도에 직결되므로, 잘못된 데이터가 자동 패스되면 안 됨 (REQUIREMENTS.md 6.1)
 
-- **현재**: `LIVESTOCK_ANOMALY` 분석에서 정상 판단 시 `AUTO_CLEARED` 이력을 남기고 `AirflowService.clear()`로 Airflow `clearTaskInstances` API를 호출. 응답에 따라 `AUTO_CLEAR_SUCCESS`(`taskInstances` 1건 이상) 또는 `AUTO_CLEAR_FAILED`(Feign 예외 또는 빈 `taskInstances`)로 종결. 요청 시 `only_failed=true`, `include_downstream=true`, `reset_dag_runs=true`로 downstream task와 DAG run까지 함께 재개됨.
-- **현재**: 모든 종결 결과(`AUTO_CLEAR_SUCCESS` / `AUTO_CLEAR_FAILED` / `MANUAL_REVIEW_REQUIRED`)는 `StatusLog`에 append-only로 영구 보관 → 사후 정확도 측정 가능.
+- **현재**: `LIVESTOCK_ANOMALY` 분석에서 정상 판단 시 `AUTO_VERIFIED` 이력을 남기고 `AirflowService.markSuccess()`로 Airflow `updateTaskInstancesState` API(`new_state="success"`)를 호출. task 코드를 재실행하지 않고 task instance state만 success로 전이. 응답에 따라 `AUTO_MARK_SUCCESS`(`taskInstances` 1건 이상) 또는 `AUTO_MARK_SUCCESS_FAILED`(Feign 예외 또는 빈 `taskInstances`)로 종결. 요청 시 `include_downstream=true`로 `upstream_failed` 상태의 downstream task도 함께 success 처리.
+- **현재**: 모든 종결 결과(`AUTO_MARK_SUCCESS` / `AUTO_MARK_SUCCESS_FAILED` / `MANUAL_REVIEW_REQUIRED`)는 `StatusLog`에 append-only로 영구 보관 → 사후 정확도 측정 가능.
 - **계획**: SMS 알림(`error-notification` 토픽 + `NotificationConsumer`) 도입 시 자동 처리 케이스에도 운영자 인지를 위해 항상 알림 발송.
 
 ---
@@ -497,7 +501,7 @@ FRMHS_NO (CHAR 8)                 FRMHS_SN (NUMBER 13) ← TN_FRMHS.FRMHS_SN
 
 | 토픽 (후보) | 시점 | 용도 |
 |-------------|------|------|
-| `batch-action-result` | 조치 결과 추적 필요 시 | Clear/Success 실행 결과 (성공/실패) |
+| `batch-action-result` | 조치 결과 추적 필요 시 | Mark Success 실행 결과 (성공/실패) |
 | `data-sync-detected` | 원천 DB Polling 구현 시 | 방역본부 데이터 수정 감지 이벤트 |
 ---
 

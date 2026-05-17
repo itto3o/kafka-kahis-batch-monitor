@@ -37,10 +37,10 @@
 │              │       (DPL → LSFARM 농가번호 매핑)                              │
 │              │                                                                │
 │              └──► 결과 분기                                                    │
-│                    ├── LIKELY_NORMAL  → AUTO_CLEARED 이력 →                    │
-│                    │                    AirflowService.clear() 호출 →          │
-│                    │                    AUTO_CLEAR_SUCCESS / AUTO_CLEAR_FAILED │
-│                    │                    이력 추가                              │
+│                    ├── LIKELY_NORMAL  → AUTO_VERIFIED 이력 →                   │
+│                    │                    AirflowService.markSuccess() 호출 →    │
+│                    │                    AUTO_MARK_SUCCESS /                    │
+│                    │                    AUTO_MARK_SUCCESS_FAILED 이력 추가     │
 │                    └── 그 외           → MANUAL_REVIEW_REQUIRED 이력 추가       │
 │                                                                              │
 │  분석 미지원 토픽 (notAnalysisTopics 자동 산출)                                │
@@ -72,7 +72,7 @@ Airflow → Spring (수신/파싱)  ← 여기는 단순 HTTP, Kafka 없어도 �
     ┌───────────┴───────────┐
     ▼                       ▼
 검증/자동조치 Consumer      알림 Consumer
-(HIST 분석 + Clear API)    (SMS 발송)
+(HIST 분석 + Mark Success API)    (SMS 발송)
 ```
 
 에러 수신 한 건이 errorType별 검증 Consumer로 라우팅되고, 검증 결과와 무관하게 알림 Consumer는 **동시에** 메시지를 받아 처리합니다. Consumer끼리 직접 호출하는 것이 아니라, **토픽을 통해 간접적으로 연결**됩니다 (Event-Driven Choreography 패턴).
@@ -121,7 +121,7 @@ Kafka의 가치는 수신 이후의 **비동기 파이프라인 구간**(디커�
    - `LivestockHistoryAnalyzer.analyze()` — HIST 조회 + tolerance 비교 → `AnalyzeResultData(judgementType, reason)` 반환
    - `LsFarmIdFinder.find()` — DPL→LSFARM 농가번호 매핑
    - 결과 분기:
-     - `LIKELY_NORMAL` → `AUTO_CLEARED` 이력 → `AirflowService.clear()` 호출 → 응답에 따라 `AUTO_CLEAR_SUCCESS` 또는 `AUTO_CLEAR_FAILED` 이력 추가 (Feign 예외 또는 빈 `taskInstances` 응답이면 `AUTO_CLEAR_FAILED`)
+     - `LIKELY_NORMAL` → `AUTO_VERIFIED` 이력 → `AirflowService.markSuccess()` 호출 → 응답에 따라 `AUTO_MARK_SUCCESS` 또는 `AUTO_MARK_SUCCESS_FAILED` 이력 추가 (Feign 예외 또는 빈 `taskInstances` 응답이면 `AUTO_MARK_SUCCESS_FAILED`)
      - 그 외 (`LIKELY_ANOMALY` / `UNKNOWN`) → `MANUAL_REVIEW_REQUIRED` 이력 추가
 3. 예외 발생 시 `log.error` 후 ack (※ MANUAL_REVIEW_REQUIRED 종결 row 추가는 미구현)
 
@@ -130,9 +130,9 @@ Kafka의 가치는 수신 이후의 **비동기 파이프라인 구간**(디커�
 1. 즉시 `MANUAL_REVIEW_REQUIRED` 이력 추가 + `JudgementType.UNKNOWN`
 2. ack
 
-| Consumer | 소비 토픽 | 자동 검증 로직 | 자동 Clear |
+| Consumer | 소비 토픽 | 자동 검증 로직 | 자동 Mark Success |
 |----------|----------|--------------|----------|
-| `KafkaLivestockErrorEventConsumer` | `error.livestock-anomaly` | HIST 조회 + tolerance ×0.5~×2.0 매칭 | ○ (`AirflowService.clear()` 호출 후 `AUTO_CLEAR_SUCCESS`/`AUTO_CLEAR_FAILED` 이력) |
+| `KafkaLivestockErrorEventConsumer` | `error.livestock-anomaly` | HIST 조회 + tolerance ×0.5~×2.0 매칭 | ○ (`AirflowService.markSuccess()` 호출 후 `AUTO_MARK_SUCCESS`/`AUTO_MARK_SUCCESS_FAILED` 이력) |
 | `KafkaEventConsumer` | `ErrorType.isNeedAnalysis = false` 인 모든 토픽 (예: `error.prediction-anomaly`, `error.asf-batch-failure` 등) | 없음 — 즉시 `MANUAL_REVIEW_REQUIRED` | × |
 
 ### 2.2 공통 처리 Consumer (미구현)
@@ -178,10 +178,10 @@ kr.go.kahis.batchmonitor/
 ├── domain/
 │   ├── airflow/                                     ← Airflow REST 호출 (Feign)
 │   │   ├── client/
-│   │   │   └── AirflowClient.java                   ← @FeignClient (clearTaskInstances)
+│   │   │   └── AirflowClient.java                   ← @FeignClient (updateTaskInstancesState)
 │   │   └── dto/
-│   │       ├── request/TaskClearRequest.java        ← include_downstream / reset_dag_runs 포함
-│   │       └── response/TaskClearResponse.java
+│   │       ├── request/TaskMarkSuccessRequest.java  ← dag_run_id 기반 / new_state=success / include_* 4개 (모두 false)
+│   │       └── response/TaskMarkSuccessResponse.java
 │   │
 │   ├── kafka/
 │   │   ├── consumer/
@@ -220,7 +220,7 @@ kr.go.kahis.batchmonitor/
 │       ├── entity/
 │       │   └── StatusLog.java                       ← append-only 이력 엔티티 (lsfarmId 포함)
 │       ├── enumeration/
-│       │   ├── StatusType.java                      ← RECEIVED / AUTO_VERIFYING / AUTO_CLEARED / AUTO_CLEAR_SUCCESS / AUTO_CLEAR_FAILED / MANUAL_REVIEW_REQUIRED
+│       │   ├── StatusType.java                      ← RECEIVED / AUTO_VERIFYING / AUTO_VERIFIED / AUTO_MARK_SUCCESS / AUTO_MARK_SUCCESS_FAILED / MANUAL_REVIEW_REQUIRED
 │       │   └── JudgementType.java                   ← LIKELY_NORMAL / LIKELY_ANOMALY / UNKNOWN
 │       ├── repository/
 │       │   └── StatusLogRepository.java
@@ -231,7 +231,7 @@ kr.go.kahis.batchmonitor/
 ├── service/
 │   ├── StatusLogService.java / StatusLogServiceImpl.java       ← 수신/파싱/저장/Kafka 발행
 │   ├── KahisService.java    / KahisServiceImpl.java          ← 사육두수 분석 오케스트레이션 (정상 판단 시 AirflowService 호출)
-│   ├── AirflowService.java  / AirflowServiceImpl.java        ← KafkaEvent → TaskClearRequest 변환 + AirflowClient 호출
+│   ├── AirflowService.java  / AirflowServiceImpl.java        ← KafkaEvent → TaskMarkSuccessRequest 변환 + AirflowClient 호출
 │
 └── vo/
     ├── LivestockHistoryAnalyzer.java                ← FarmMapper 호출 + tolerance 분석
@@ -269,7 +269,7 @@ public class StatusLogController {
 }
 ```
 
-`ErrorRequest`는 `@JsonProperty` 기반 record (snake_case JSON 키 → camelCase Java 필드 매핑). `executionDate`는 `LocalDate` + `@JsonFormat(pattern = "yyyy-MM-dd")`로 받아 callback의 `context["ds"]` 값과 매칭됩니다.
+`ErrorRequest`는 `@JsonProperty` 기반 record (snake_case JSON 키 → camelCase Java 필드 매핑). `dagRunId`는 callback의 `context["dag_run"].run_id` 값을 그대로 받아 Airflow Mark Success API 호출 시 식별자로 사용됩니다.
 
 ### 4.2 StatusLogServiceImpl (파싱 + 저장 + 토픽 발행)
 
@@ -318,13 +318,13 @@ public class KafkaEventProducer {
 
   private final KafkaTemplate<String, KafkaEvent> kafkaTemplate;
 
-  public void publish(String eventId, String dagId, String taskId, ErrorType errorType,
-      String errorMessage, Map<String, String> metadata) {
+  public void publish(String eventId, String dagId, String taskId, String dagRunId,
+      ErrorType errorType, String errorMessage, Map<String, String> metadata) {
     String topic = errorType.getTopic();
     LocalDateTime now = LocalDateTime.now();
     String key = dagId + "-" + taskId + "-" + now.toLocalDate().toString();
-    KafkaEvent event = new KafkaEvent(eventId, dagId, taskId, errorType, errorMessage,
-        metadata, now);
+    KafkaEvent event = new KafkaEvent(eventId, dagId, taskId, dagRunId, errorType,
+        errorMessage, metadata, now);
 
     kafkaTemplate.send(topic, key, event)
         .whenComplete((result, throwable) -> {
@@ -426,7 +426,7 @@ public class KafkaEventConsumer implements KafkaConsumer {
 
 ### 4.6 KahisServiceImpl (분석 오케스트레이션)
 
-비정상/판단불가는 early return으로 종결하고, 정상 판단된 경우만 `AUTO_CLEARED` 이력을 남긴 뒤 `AirflowService.clear()`를 호출합니다. Feign 예외 또는 빈 `taskInstances` 응답은 `AUTO_CLEAR_FAILED`로 동일하게 처리합니다.
+비정상/판단불가는 early return으로 종결하고, 정상 판단된 경우만 `AUTO_VERIFIED` 이력을 남긴 뒤 `AirflowService.markSuccess()`를 호출합니다. Feign 예외 또는 빈 `taskInstances` 응답은 `AUTO_MARK_SUCCESS_FAILED`로 동일하게 처리합니다.
 
 ```java
 @Slf4j
@@ -449,19 +449,19 @@ public class KahisServiceImpl implements KahisService {
       return;
     }
 
-    saveStatusLog(event, lsFarmId, analyzeResult, StatusType.AUTO_CLEARED);
+    saveStatusLog(event, lsFarmId, analyzeResult, StatusType.AUTO_VERIFIED);
 
-    StatusType clearStatus;
+    StatusType markStatus;
     try {
-      TaskClearResponse clearResponse = airflowService.clear(event);
-      clearStatus = clearResponse.taskInstances().isEmpty()
-          ? StatusType.AUTO_CLEAR_FAILED
-          : StatusType.AUTO_CLEAR_SUCCESS;
+      TaskMarkSuccessResponse response = airflowService.markSuccess(event);
+      markStatus = response.taskInstances().isEmpty()
+          ? StatusType.AUTO_MARK_SUCCESS_FAILED
+          : StatusType.AUTO_MARK_SUCCESS;
     } catch (RuntimeException e) {
-      log.error("Airflow Clear API 호출 실패: eventId={}", event.eventId(), e);
-      clearStatus = StatusType.AUTO_CLEAR_FAILED;
+      log.error("Airflow Mark Success API 호출 실패: eventId={}", event.eventId(), e);
+      markStatus = StatusType.AUTO_MARK_SUCCESS_FAILED;
     }
-    saveStatusLog(event, lsFarmId, analyzeResult, clearStatus);
+    saveStatusLog(event, lsFarmId, analyzeResult, markStatus);
   }
 
   private void saveStatusLog(KafkaEvent event, String lsFarmId, AnalyzeResultData analyzeResult,
@@ -484,9 +484,9 @@ public class KahisServiceImpl implements KahisService {
 
 > `lsFarmId`는 `LsFarmIdFinder`가 NPE를 던질 가능성이 있어 분석 흐름 전체를 막을 수 있습니다 — 향후 null 허용 흐름으로 보완 필요.
 
-### 4.7 AirflowServiceImpl (Airflow Clear API 호출)
+### 4.7 AirflowServiceImpl (Airflow Mark Success API 호출)
 
-`KafkaEvent`를 `TaskClearRequest`로 변환해 `AirflowClient.clear()`를 호출합니다. 시간 범위는 `executionDate` 하루(UTC 자정~다음날 자정)로 잡고 ISO-8601 Instant 형식으로 직렬화합니다. downstream task와 DAG run까지 함께 재개되도록 `include_downstream=true`, `reset_dag_runs=true`를 함께 전송합니다.
+운영 SM이 Airflow UI에서 수행하는 "Mark as Success"를 자동화한 호출. `KafkaEvent`를 `TaskMarkSuccessRequest`로 변환해 `AirflowClient.markSuccess()`를 호출합니다. 대상 DAG run은 `dag_run_id`로 식별합니다(Airflow API는 `execution_date`와 `dag_run_id`를 상호배타로 받음 — timezone/format 변환 실수가 없는 `dag_run_id`를 사용). `new_state="success"`.
 
 ```java
 @Service
@@ -496,22 +496,23 @@ public class AirflowServiceImpl implements AirflowService {
   private final AirflowClient client;
 
   @Override
-  public TaskClearResponse clear(KafkaEvent event) {
-    TaskClearRequest request = new TaskClearRequest(
+  public TaskMarkSuccessResponse markSuccess(KafkaEvent event) {
+    TaskMarkSuccessRequest request = new TaskMarkSuccessRequest(
         false,
-        List.of(event.taskId()),
-        event.executionDate().atStartOfDay(ZoneOffset.UTC).toInstant().toString(),
-        event.executionDate().plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant().toString(),
-        true,
-        true,
-        true);
+        event.taskId(),
+        event.dagRunId(),
+        "success",
+        false,
+        false,
+        false,
+        false);
 
-    return client.clear(event.dagId(), request);
+    return client.markSuccess(event.dagId(), request);
   }
 }
 ```
 
-> `only_failed=true`로 현재 failed 상태의 task instance만 대상으로 합니다. 운영자가 먼저 처리해 더 이상 failed가 아닌 경우 응답의 `taskInstances`가 빈 리스트로 돌아오며, 호출부(`KahisServiceImpl`)에서 이를 `AUTO_CLEAR_FAILED`로 처리합니다.
+> Clear API와 달리 Mark Success는 task 코드를 다시 실행하지 않고 state만 강제로 success로 전이시킵니다. 운영에서 "데이터 조치는 운영자가 처리하되, Airflow 상태 전이 + downstream 재개는 자동화"한다는 책임 경계를 만들기 위한 선택입니다.
 
 ### 4.8 LivestockHistoryAnalyzer (HIST tolerance 분석)
 
@@ -565,7 +566,7 @@ public class LivestockHistoryAnalyzer {
 }
 ```
 
-> `currentCount = 0`일 때 동작은 REQUIREMENTS.md 3.5.6 참조. 현재는 별도 분기 없이 HIST에 0이 있으면 자동 Clear 흐름을 탑니다.
+> `currentCount = 0`일 때 동작은 REQUIREMENTS.md 3.5.6 참조. 현재는 별도 분기 없이 HIST에 0이 있으면 자동 Mark Success 흐름을 탑니다.
 
 ### 4.9 LsFarmIdFinder (DPL → LSFARM 농가번호 매핑)
 
@@ -675,7 +676,7 @@ public class DefaultErrorParser implements ErrorMessageParser {
 Airflow callback
     │
     │  POST /api/v1/errors  (JSON)
-    │  dag_id, task_id, execution_date, error_message, try_number
+    │  dag_id, task_id, dag_run_id, error_message, try_number
     │
     ▼
 StatusLogController ───────────────────────────────────────────────────────────
@@ -727,13 +728,13 @@ StatusLogServiceImpl.publish()                                                 �
        │       FarmMapper.selectFarmIdLsfarm → LSFARM CNTC_FRMHS_NO
        │
        └──► 결과 분기
-              ├── LIKELY_NORMAL → AUTO_CLEARED 이력 추가
+              ├── LIKELY_NORMAL → AUTO_VERIFIED 이력 추가
               │                    │
               │                    ▼
-              │                  AirflowService.clear()
+              │                  AirflowService.markSuccess()
               │                    │  (Feign 예외 또는 빈 taskInstances → FAILED)
               │                    ▼
-              │                  AUTO_CLEAR_SUCCESS 또는 AUTO_CLEAR_FAILED 이력 추가
+              │                  AUTO_MARK_SUCCESS 또는 AUTO_MARK_SUCCESS_FAILED 이력 추가
               │
               └── 그 외        → MANUAL_REVIEW_REQUIRED 이력 추가
               그리고 ack
@@ -749,7 +750,7 @@ StatusLogServiceImpl.publish()                                                 �
 
 본 시스템의 책임 범위는 다음과 같이 명확히 분리됩니다.
 
-- **자동 처리 가능한 에러**: HIST 등을 분석해 정상으로 판단되면 Airflow Clear API를 직접 호출하고, 호출 결과를 로그 테이블에 기록합니다.
+- **자동 처리 가능한 에러**: HIST 등을 분석해 정상으로 판단되면 Airflow Mark Success API(`updateTaskInstancesState`, `new_state="success"`)를 직접 호출해 task instance state를 success로 전이시키고, 호출 결과를 로그 테이블에 기록합니다. 운영 SM이 UI에서 "Mark as Success"를 누르는 행위와 동일.
 - **운영자 판단이 필요한 에러**: 자동 판단 불가 또는 자동 판단 결과가 비정상인 경우, 운영자가 **Airflow UI에서 직접** Clear/Mark Success 처리합니다. 이 경우 본 시스템은 "운영자 처리 필요" 상태까지만 기록하며, **이후 Airflow에서 어떤 조치가 이루어졌는지는 추적하지 않습니다.**
 
 > 즉, 본 시스템은 "자동 조치가 가능한 케이스를 걸러서 자동화"하는 역할만 수행하며, 운영자 승인 워크플로우(승인 화면, 승인 내역 저장 등)는 가지지 않습니다.
@@ -790,10 +791,10 @@ StatusLogServiceImpl.publish()                                                 �
    정상 판단     비정상/판단불가      MANUAL_REVIEW_REQUIRED
        │             │              (운영자가 Airflow UI에서
        ▼             ▼                직접 처리 — 종결)
-  AUTO_CLEARED   MANUAL_REVIEW_REQUIRED
+  AUTO_VERIFIED   MANUAL_REVIEW_REQUIRED
        │           (종결)
        ▼
-  AirflowService.clear()
+  AirflowService.markSuccess()
   (Feign 예외 또는 빈 taskInstances → FAILED)
        │
    ┌───┴───┐
@@ -801,13 +802,13 @@ StatusLogServiceImpl.publish()                                                 �
  성공    실패
    │       │
    ▼       ▼
-AUTO_      AUTO_CLEAR_FAILED
+AUTO_      AUTO_MARK_SUCCESS_FAILED
 CLEAR_     (운영자 수동 개입 — 종결)
 SUCCESS
 (종결)
 ```
 
-모든 종결 상태(`AUTO_CLEAR_SUCCESS`, `AUTO_CLEAR_FAILED`, `MANUAL_REVIEW_REQUIRED`)의 row가 추가되면 본 시스템 내에서 더 이상의 이력은 추가되지 않습니다. `AUTO_CLEARED`는 정상 판단 직후의 중간 상태이며, 같은 처리 흐름 안에서 Airflow Clear 호출 결과가 이어 기록됩니다.
+모든 종결 상태(`AUTO_MARK_SUCCESS`, `AUTO_MARK_SUCCESS_FAILED`, `MANUAL_REVIEW_REQUIRED`)의 row가 추가되면 본 시스템 내에서 더 이상의 이력은 추가되지 않습니다. `AUTO_VERIFIED`는 정상 판단 직후의 중간 상태이며, 같은 처리 흐름 안에서 Airflow Mark Success 호출 결과가 이어 기록됩니다.
 
 > 화살표는 "row 갱신"이 아니라 "다음 단계의 row 추가"를 의미합니다. 이전 단계 row는 그대로 보존됩니다.
 
@@ -819,9 +820,9 @@ SUCCESS
 |------|------|----------|----------|------|
 | `RECEIVED` | 에러 수신 직후 | `StatusLogServiceImpl` | × | 첫 이력 row |
 | `AUTO_VERIFYING` | 자동 검증 시작 | `KafkaLivestockErrorEventConsumer` | × | HIST 조회 등 자동 분석 진행 중 |
-| `AUTO_CLEARED` | 자동 검증 정상 판단 직후 | `KahisServiceImpl` | × | 정상 판단 완료 — 같은 처리 흐름에서 Airflow Clear API 호출이 이어짐 |
-| `AUTO_CLEAR_SUCCESS` | Airflow Clear API 호출 성공 | `KahisServiceImpl` | ✓ | `clearTaskInstances` 응답에 task instance가 1건 이상 포함된 경우 |
-| `AUTO_CLEAR_FAILED` | Airflow Clear API 호출 실패 | `KahisServiceImpl` | ✓ | Feign 예외 또는 응답 `taskInstances`가 비어 있는 경우 — 운영자 수동 개입 필요 |
+| `AUTO_VERIFIED` | 자동 검증 정상 판단 직후 | `KahisServiceImpl` | × | 정상 판단 완료 — 같은 처리 흐름에서 Airflow Mark Success API 호출이 이어짐 |
+| `AUTO_MARK_SUCCESS` | Airflow Mark Success API 호출 성공 | `KahisServiceImpl` | ✓ | `updateTaskInstancesState` 응답에 task instance가 1건 이상 포함된 경우 |
+| `AUTO_MARK_SUCCESS_FAILED` | Airflow Mark Success API 호출 실패 | `KahisServiceImpl` | ✓ | Feign 예외 또는 응답 `taskInstances`가 비어 있는 경우 — 운영자 수동 개입 필요 |
 | `MANUAL_REVIEW_REQUIRED` | 자동 판단 불가/비정상 또는 분석 미지원 토픽 | `KahisServiceImpl` 또는 `KafkaEventConsumer` | ✓ | 운영자가 Airflow에서 직접 처리 — **이후 추적 없음** |
 
 ### 7.4 errorType별 처리 정책
@@ -830,7 +831,7 @@ SUCCESS
 
 | errorType | `isNeedAnalysis` | Consumer | 동작 |
 |-----------|---------------|----------|------|
-| `LIVESTOCK_ANOMALY` | true | `KafkaLivestockErrorEventConsumer` | HIST 조회 → 정상 시 `AUTO_CLEARED` + `AirflowService.clear()` → `AUTO_CLEAR_SUCCESS`/`AUTO_CLEAR_FAILED`, 그 외 `MANUAL_REVIEW_REQUIRED` |
+| `LIVESTOCK_ANOMALY` | true | `KafkaLivestockErrorEventConsumer` | HIST 조회 → 정상 시 `AUTO_VERIFIED` + `AirflowService.markSuccess()` → `AUTO_MARK_SUCCESS`/`AUTO_MARK_SUCCESS_FAILED`, 그 외 `MANUAL_REVIEW_REQUIRED` |
 | `PREDICTION_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
 | `FARM_COUNT_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
 | `PNU_ANOMALY` | false | `KafkaEventConsumer` | 즉시 `MANUAL_REVIEW_REQUIRED` |
@@ -844,7 +845,7 @@ SUCCESS
 
 ### 7.5 StatusLog 엔티티
 
-append-only 모델이므로 row 갱신 가정의 필드(`statusUpdatedAt`, `clearRequestedAt`, `clearFailureReason` 등)는 두지 않습니다. Clear 결과 등 상태 부가 정보는 해당 상태 row의 `reason`에 함께 기록합니다. `eventId`는 unique가 아니라 시간순 조회를 위한 복합 인덱스(`event_id + create_at`)로만 다룹니다.
+append-only 모델이므로 row 갱신 가정의 필드(`statusUpdatedAt`, `markSuccessRequestedAt`, `markSuccessFailureReason` 등)는 두지 않습니다. Mark Success 결과 등 상태 부가 정보는 해당 상태 row의 `reason`에 함께 기록합니다. `eventId`는 unique가 아니라 시간순 조회를 위한 복합 인덱스(`event_id + create_at`)로만 다룹니다.
 
 `lsfarmId`(방역본부 농장 번호)는 `KahisServiceImpl`이 `LsFarmIdFinder`로 조회해 같이 적재합니다. 분석을 수행하지 않는 row(예: `RECEIVED`, `AUTO_VERIFYING`, `KafkaEventConsumer`의 `MANUAL_REVIEW_REQUIRED`)에서는 null로 들어갑니다.
 
@@ -918,7 +919,7 @@ public class StatusLog {
 }
 ```
 
-> **연쇄 에러 추적 제거**: 운영자가 Airflow에서 직접 Clear한 이후의 처리는 본 시스템이 알 수 없으므로, 이전 설계에 있던 `parentEventId` / `DOWNSTREAM_FAILED` 개념은 더 이상 유지하지 않습니다. 새 에러는 항상 독립된 이벤트로 기록됩니다.
+> **연쇄 에러 추적 제거**: 운영자가 Airflow에서 직접 처리한 이후의 처리는 본 시스템이 알 수 없으므로, 이전 설계에 있던 `parentEventId` / `DOWNSTREAM_FAILED` 개념은 더 이상 유지하지 않습니다. 새 에러는 항상 독립된 이벤트로 기록됩니다.
 
 ### 7.6 컴포넌트별 코드 참조
 
@@ -926,7 +927,7 @@ public class StatusLog {
 - 사육두수 분석 Consumer: 4.4 (`KafkaLivestockErrorEventConsumer`)
 - 분석 미지원 토픽 묶음 Consumer: 4.5 (`KafkaEventConsumer`)
 - 분석 오케스트레이션: 4.6 (`KahisServiceImpl`)
-- Airflow Clear API 호출: 4.7 (`AirflowServiceImpl`)
+- Airflow Mark Success API 호출: 4.7 (`AirflowServiceImpl`)
 - HIST tolerance 분석: 4.8 (`LivestockHistoryAnalyzer`)
 - 농가번호 매핑: 4.9 (`LsFarmIdFinder`)
 - SMS 알림: 4.10 (TODO)
